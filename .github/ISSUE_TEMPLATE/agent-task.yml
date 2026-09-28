@@ -1,0 +1,77 @@
+name: Agent Task
+description: >-
+  Work item for the orchestrator (Definition of Ready required).
+  Submitting this form applies agent-ready, so submitting is "go": a runner may claim it immediately.
+title: "[Agent] "
+labels: ["agent-ready"]
+body:
+  - type: textarea
+    id: business_goal
+    attributes:
+      label: Business Goal
+      description: Why this matters, in one or two sentences. Who benefits and how.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Each criterion must be testable. The runner builds to these and nothing else.
+      placeholder: |
+        1. When <action>, then <observable result>. (binary pass/fail)
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-Goals
+      description: What is explicitly out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: edge_cases
+    attributes:
+      label: Edge Cases
+      description: Inputs or states that must be handled, and how.
+    validations:
+      required: false
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: Test Plan
+      description: Exact commands to run and the expected result of each.
+    validations:
+      required: true
+  - type: textarea
+    id: rollback_plan
+    attributes:
+      label: Rollback Plan
+      description: How to undo this change if it goes wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: files_expected
+    attributes:
+      label: Files Expected to Change
+      description: Paths you expect the change to touch. Helps reviewers spot scope creep.
+    validations:
+      required: false
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - Low
+        - Medium
+        - High
+        - Critical
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes for the Runner
+      description: Context, pointers to prior work, anything else the builder should know.
+    validations:
+      required: false
