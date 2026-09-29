@@ -1,6 +1,6 @@
 # HARNESS.md: the orchestrator contract for mbsgcorp/orch-pilot
 
-Installed by `orch enroll` at 2026-09-28T20:19:17Z. Change it only by re-running enroll, never in a task branch.
+Installed by `orch enroll` at 2026-09-29T14:01:34Z. Change it only by re-running enroll, never in a task branch.
 
 ## What this is
 This repo takes work as GitHub issues and returns it as pull requests. A human files an issue, an agent
@@ -46,6 +46,7 @@ Low
 ## Branch rules
 - Work only on `agent/<issue-number>`, e.g. `agent/42`. Never commit to or push `main`.
 - Stage explicit paths: `git add orch/list.py tests/test_list.py`. Never `git add -A` or `git add .`.
+main is protected for everyone, administrators included; changes land only by merged PR.
 
 ## PR body the runner produces
 ```
