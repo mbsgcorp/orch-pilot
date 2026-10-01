@@ -4,9 +4,9 @@
 Usage: python3 tools/check_links.py
 
 Scans every *.md file under the repository root (skipping .git/) for inline
-links [text](target). External (http://, https://), mailto: and #anchor-only
-targets are skipped. Links inside fenced code blocks and inline code spans are
-ignored. Exit code is 0 when nothing is missing, 1 otherwise.
+links [text](target). External (http://, https://), mailto:, #anchor-only and
+absolute-path (/...) targets are skipped. Links inside fenced code blocks and
+inline code spans are ignored. Exit code is 0 when nothing is missing, 1 otherwise.
 """
 
 import os
@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SKIP_PREFIXES = ("http://", "https://", "mailto:", "#")
+SKIP_PREFIXES = ("http://", "https://", "mailto:", "#", "/")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]*)\)")
 INLINE_CODE_RE = re.compile(r"(`+).*?\1")
 

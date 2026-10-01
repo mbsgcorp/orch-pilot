@@ -53,6 +53,11 @@ class CheckLinksTest(unittest.TestCase):
                    "[c](mailto:someone@example.com) [d](#section)\n")
         self.assertEqual(check_links.check(self.root), (0, []))
 
+    def test_absolute_path_skipped(self):
+        self.write("README.md", "[a](/etc/passwd) [b](/nope.md) [c](gone.md)\n")
+        self.assertEqual(check_links.check(self.root),
+                         (1, [("README.md", 1, "gone.md")]))
+
     def test_anchor_suffix_checks_file(self):
         self.write("file.md")
         self.write("README.md", "[ok](file.md#section) [bad](nope.md#section)\n")
