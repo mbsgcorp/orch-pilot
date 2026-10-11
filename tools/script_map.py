@@ -15,7 +15,8 @@ Every *.js file under PATH is scanned (directory symlinks are not followed;
 *.min.js files are excluded). Files are classified as SuiteScript by their
 @NScriptType / @NApiVersion tags or nlapi calls, then parsed for entry points,
 "DEPLOY ON:" record targets, touched record types, define([...]) library
-dependencies, clientScriptModulePath and a simple risk score. Untagged
+dependencies, clientScriptModulePath and a simple risk score; each record gets
+a business-area category (see record_category). Untagged
 SuiteScript 1.0 files get a script type inferred from their folder names. The
 result is embedded as JSON in tools/script_map_template.html and written to
 OUT. On success one summary line is printed and the exit code is 0; every
@@ -52,6 +53,40 @@ XRAY_LANES = [
     "postSourcing", "sublistChanged", "lineInit", "validateField",
     "validateLine", "validateInsert", "validateDelete", "saveRecord",
 ]
+
+RECORD_CATEGORIES = [
+    "Sales", "Billing / AR", "Purchasing / AP", "Items",
+    "Inventory / Manufacturing", "Entities", "Accounting", "Custom records", "Other",
+]
+
+RECORD_AREAS = {
+    record_id: area
+    for area, ids in (
+        ("Sales", ("estimate", "opportunity", "salesorder", "cashsale", "cashrefund",
+                   "returnauthorization", "itemfulfillment")),
+        ("Billing / AR", ("invoice", "customerpayment", "customerdeposit",
+                          "depositapplication", "creditmemo", "customerrefund",
+                          "statementcharge")),
+        ("Purchasing / AP", ("purchaseorder", "purchaserequisition", "requisition",
+                             "vendorbill", "vendorpayment", "vendorcredit",
+                             "vendorprepayment", "vendorreturnauthorization",
+                             "itemreceipt")),
+        ("Inventory / Manufacturing", ("workorder", "workorderissue",
+                                       "workordercompletion", "workorderclose",
+                                       "assemblybuild", "assemblyunbuild",
+                                       "inventoryadjustment", "inventorytransfer",
+                                       "inventorycount", "inventorystatuschange",
+                                       "inventorynumber", "transferorder", "bin",
+                                       "bintransfer", "binworksheet")),
+        ("Entities", ("customer", "vendor", "employee", "contact", "partner", "lead",
+                      "prospect")),
+        ("Accounting", ("journalentry", "intercompanyjournalentry",
+                        "advintercompanyjournalentry", "account", "accountingperiod",
+                        "currency", "deposit", "check", "transfer", "subsidiary",
+                        "department", "location", "classification")),
+    )
+    for record_id in ids
+}
 
 TYPE_BLOCKLIST = {
     "text", "textarea", "select", "multiselect", "checkbox", "date",
@@ -253,6 +288,22 @@ def touched_records(text):
     return found
 
 
+def record_category(record_id):
+    """Return the business area (one of RECORD_CATEGORIES) for a lowercase record id.
+
+    Rules in order: customrecord* ids are "Custom records"; ids in RECORD_AREAS
+    take their listed area; "item" or any id ending in "item" is "Items"; anything
+    else is "Other".
+    """
+    if record_id.startswith("customrecord"):
+        return "Custom records"
+    if record_id in RECORD_AREAS:
+        return RECORD_AREAS[record_id]
+    if record_id == "item" or record_id.endswith("item"):
+        return "Items"
+    return "Other"
+
+
 def dependencies(text):
     """Return (relative_paths, N/ modules) from the first define([...]) array."""
     match = DEFINE_RE.search(text)
@@ -443,6 +494,7 @@ def collect(repos):
                 "repo": label,
                 "record_id": record_id,
                 "label": records[record_id] or record_id,
+                "category": record_category(record_id),
             })
         status = branch_status(root)
         repo_rows.append({
@@ -451,7 +503,8 @@ def collect(repos):
             "script_count": len(script_nodes),
         })
 
-    return {"repos": repo_rows, "nodes": nodes, "edges": edges, "skipped": skipped}
+    return {"repos": repo_rows, "nodes": nodes, "edges": edges, "skipped": skipped,
+            "record_categories": list(RECORD_CATEGORIES)}
 
 
 def render(data):

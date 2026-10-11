@@ -133,21 +133,45 @@ main { padding: 12px 16px; }
 .matrix td.zero { color: var(--muted); }
 .matrix .sel { outline: 2px solid var(--accent); outline-offset: -2px; }
 .matrix .in-sel { color: var(--accent); font-weight: 700; }
-#i-list-heading { font-size: 15px; margin: 0 0 8px; }
-#i-list details {
+#i-list-heading, #rec-list-heading { font-size: 15px; margin: 0 0 8px; }
+#i-list details, #rec-list details {
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
     padding: 6px 10px;
     margin-bottom: 6px;
 }
-#i-list summary { cursor: pointer; }
-#i-list .name { font-weight: 600; word-break: break-word; }
-#i-list .path { display: block; margin-left: 0; }
-#i-list dl { margin: 6px 0 0; }
-#i-list dt { font-weight: 600; margin-top: 6px; }
-#i-list dd { margin: 2px 0 0; word-break: break-word; }
-#i-list dd ul { margin: 0; padding-left: 18px; }
+#i-list summary, #rec-list summary { cursor: pointer; }
+#i-list .name, #rec-list .name { font-weight: 600; word-break: break-word; }
+#i-list .path, #rec-list .path { display: block; margin-left: 0; }
+#i-list dl, #rec-list dl { margin: 6px 0 0; }
+#i-list dt, #rec-list dt { font-weight: 600; margin-top: 6px; }
+#i-list dd, #rec-list dd { margin: 2px 0 0; word-break: break-word; }
+#i-list dd ul, #rec-list dd ul { margin: 0; padding-left: 18px; }
+#rec-missing { margin-bottom: 8px; }
+#rec-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.card.area { background: var(--panel); border-left-color: var(--accent); }
+.card.area.sel { background: var(--badge-bg); outline: 2px solid var(--accent); outline-offset: -2px; }
+#rec-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+#rec-chips .note { margin: 0; }
+#rec-chips button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    cursor: pointer;
+    text-align: left;
+    word-break: break-word;
+}
+#rec-chips button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .kind { color: var(--muted); font-size: 12px; }
 .note { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
 .lane, .other {
@@ -158,7 +182,7 @@ main { padding: 12px 16px; }
     margin-bottom: 8px;
 }
 .lane h3, .other h3 { font-size: 14px; margin: 0 0 6px; }
-.lane ul, .other ul, #x-missing ul { margin: 0; padding-left: 18px; }
+.lane ul, .other ul, #rec-missing ul { margin: 0; padding-left: 18px; }
 .badge {
     display: inline-block;
     font-size: 11px;
@@ -205,7 +229,7 @@ main { padding: 12px 16px; }
     <div id="repo-chips"></div>
     <nav>
         <button type="button" data-view="inventory">Inventory</button>
-        <button type="button" data-view="xray">Record X-ray</button>
+        <button type="button" data-view="records">Records</button>
         <button type="button" data-view="risk">Risk grid</button>
     </nav>
 </header>
@@ -222,14 +246,17 @@ main { padding: 12px 16px; }
         <h2 id="i-list-heading"></h2>
         <div id="i-list"></div>
     </section>
-    <section id="view-xray" class="view" hidden>
+    <section id="view-records" class="view" hidden>
         <div class="controls">
-            <select id="x-repo" aria-label="Repo filter"></select>
-            <select id="x-record" aria-label="Record"></select>
+            <select id="rec-repo" aria-label="Client filter"></select>
         </div>
-        <p class="note">Order within a step follows deployment order in NetSuite, which isn't in the code.</p>
-        <details id="x-missing"><summary id="x-missing-count"></summary><ul id="x-missing-list"></ul></details>
-        <div id="x-body"></div>
+        <details id="rec-missing"><summary id="rec-missing-count"></summary><ul id="rec-missing-list"></ul></details>
+        <div id="rec-cards"></div>
+        <div id="rec-chips"></div>
+        <h2 id="rec-list-heading" hidden></h2>
+        <div id="rec-list"></div>
+        <p class="note" id="rec-note" hidden>Order within a step follows deployment order in NetSuite, which isn't in the code.</p>
+        <div id="rec-detail"></div>
     </section>
     <section id="view-risk" class="view" hidden>
         <div class="controls">
@@ -310,7 +337,7 @@ main { padding: 12px 16px; }
         chips.appendChild(chip);
     });
 
-    var views = { inventory: 'view-inventory', xray: 'view-xray', risk: 'view-risk' };
+    var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk' };
     var navButtons = document.querySelectorAll('nav button');
     function showView(name) {
         Object.keys(views).forEach(function (k) {
@@ -583,13 +610,19 @@ main { padding: 12px 16px; }
     iVersion.addEventListener('change', function () { setFilter(filter.type, iVersion.value); });
     iClear.addEventListener('click', function () { setFilter(ALL, ALL); });
 
-    // Record X-ray
-    var xRepo = document.getElementById('x-repo');
-    var xRecord = document.getElementById('x-record');
-    var xBody = document.getElementById('x-body');
-    var xMissingCount = document.getElementById('x-missing-count');
-    var xMissingList = document.getElementById('x-missing-list');
-    fillRepoSelect(xRepo);
+    // Records
+    var recRepo = document.getElementById('rec-repo');
+    var recCards = document.getElementById('rec-cards');
+    var recChips = document.getElementById('rec-chips');
+    var recListHeading = document.getElementById('rec-list-heading');
+    var recList = document.getElementById('rec-list');
+    var recNote = document.getElementById('rec-note');
+    var recDetail = document.getElementById('rec-detail');
+    var recMissingCount = document.getElementById('rec-missing-count');
+    var recMissingList = document.getElementById('rec-missing-list');
+    var recArea = ALL;
+    var recRecord = ALL;
+    fillRepoSelect(recRepo);
 
     function recordScripts(rec, kind) {
         return links[rec.id].filter(function (l) {
@@ -597,75 +630,158 @@ main { padding: 12px 16px; }
         }).map(function (l) { return byId[l.other]; });
     }
 
-    function connectedScriptCount(rec) {
-        var seen = {};
-        links[rec.id].forEach(function (l) {
-            if (byId[l.other].kind === 'script') { seen[l.other] = true; }
+    function areaRecords(repo) {
+        var areas = Object.create(null);
+        records.forEach(function (r) {
+            if (!inRepo(r, repo)) { return; }
+            var connected = links[r.id].filter(function (l) { return byId[l.other].kind === 'script'; });
+            if (!connected.length) { return; }
+            var area = areas[r.category];
+            if (!area) { area = areas[r.category] = { scripts: {}, groups: Object.create(null) }; }
+            var group = area.groups[r.record_id];
+            if (!group) {
+                group = area.groups[r.record_id] = { id: r.record_id, label: null, nodes: [], scripts: {} };
+            }
+            group.nodes.push(r);
+            if (group.label === null && r.label !== r.record_id) { group.label = r.label; }
+            connected.forEach(function (l) {
+                group.scripts[l.other] = true;
+                area.scripts[l.other] = true;
+            });
         });
-        return Object.keys(seen).length;
+        Object.keys(areas).forEach(function (name) {
+            var groups = areas[name].groups;
+            Object.keys(groups).forEach(function (id) {
+                if (groups[id].label === null) { groups[id].label = id; }
+            });
+        });
+        return areas;
     }
 
-    function scriptItem(s, showType) {
+    function sortedGroups(area) {
+        return Object.keys(area.groups).map(function (id) { return area.groups[id]; }).sort(function (a, b) {
+            return Object.keys(b.scripts).length - Object.keys(a.scripts).length ||
+                a.label.localeCompare(b.label) || a.id.localeCompare(b.id);
+        });
+    }
+
+    function mergedScripts(group, kind) {
+        var seen = {};
+        var out = [];
+        group.nodes.forEach(function (r) {
+            recordScripts(r, kind).forEach(function (s) {
+                if (!seen[s.id]) { seen[s.id] = true; out.push(s); }
+            });
+        });
+        return out;
+    }
+
+    function recScriptItem(s) {
         var li = el('li');
         li.appendChild(document.createTextNode(s.name));
-        if (showType) { li.appendChild(el('span', 'kind', ' ' + s.type)); }
+        var type = el('span', 'kind', ' · ' + s.repo + ' · ' + shortType(s.type) + ' · ' + s.version);
+        type.setAttribute('title', s.type);
+        li.appendChild(type);
         if (deployCount(s) >= 2) { li.appendChild(el('span', 'badge', 'shared')); }
-        li.appendChild(el('span', 'path', s.repo + ': ' + s.path));
+        li.appendChild(el('span', 'path', s.path));
         return li;
     }
 
-    function fillRecordPicker() {
-        var repo = xRepo.value;
-        var previous = xRecord.value;
-        clear(xRecord);
-        var list = records.filter(function (r) { return inRepo(r, repo); }).map(function (r) {
-            return { rec: r, count: connectedScriptCount(r) };
-        });
-        list.sort(function (a, b) {
-            return b.count - a.count || a.rec.label.localeCompare(b.rec.label) ||
-                a.rec.id.localeCompare(b.rec.id);
-        });
-        list.forEach(function (item) {
-            var r = item.rec;
-            var text = r.label + (r.label !== r.record_id ? ' [' + r.record_id + ']' : '') +
-                ' · ' + r.repo + ' · ' + item.count + ' scripts';
-            var opt = el('option', null, text);
-            opt.value = r.id;
-            xRecord.appendChild(opt);
-        });
-        if (list.some(function (item) { return item.rec.id === previous; })) {
-            xRecord.value = previous;
-        }
-    }
-
     function renderMissing() {
-        var repo = xRepo.value;
+        var repo = recRepo.value;
         var missing = scripts.filter(function (s) {
             return inRepo(s, repo) && !s.has_deploy_line &&
                 (s.type === 'UserEventScript' || s.type === 'ClientScript');
         });
-        xMissingCount.textContent = missing.length +
+        recMissingCount.textContent = missing.length +
             ' UserEventScript and ClientScript files have no DEPLOY ON: line';
-        clear(xMissingList);
+        clear(recMissingList);
         missing.forEach(function (s) {
-            xMissingList.appendChild(el('li', null, s.repo + ': ' + s.path));
+            recMissingList.appendChild(el('li', null, s.repo + ': ' + s.path));
         });
     }
 
-    function renderXray() {
-        clear(xBody);
-        renderMissing();
-        var repo = xRepo.value;
-        if (!scripts.some(function (s) { return inRepo(s, repo); })) {
-            xBody.appendChild(el('p', 'empty', 'No scripts found'));
+    function selectArea(name) {
+        recArea = recArea === name ? ALL : name;
+        recRecord = ALL;
+        renderRecords();
+    }
+
+    function selectRecord(id) {
+        recRecord = id;
+        renderRecords();
+    }
+
+    function renderAreaCards(areas, shown) {
+        shown.forEach(function (name) {
+            var area = areas[name];
+            var card = el('div', 'card area' + (recArea === name ? ' sel' : ''));
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.setAttribute('aria-pressed', recArea === name ? 'true' : 'false');
+            card.appendChild(el('div', 'name', name));
+            card.appendChild(el('div', 'meta', Object.keys(area.scripts).length + ' scripts'));
+            card.appendChild(el('div', 'meta', Object.keys(area.groups).length + ' record types'));
+            card.addEventListener('click', function () { selectArea(name); });
+            card.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectArea(name); }
+            });
+            recCards.appendChild(card);
+        });
+    }
+
+    function renderChips(groups) {
+        function chip(text, id) {
+            var btn = el('button', recRecord === id ? 'active' : null, text);
+            btn.type = 'button';
+            btn.setAttribute('aria-pressed', recRecord === id ? 'true' : 'false');
+            btn.addEventListener('click', function () { selectRecord(id); });
+            recChips.appendChild(btn);
+        }
+        chip('All ' + recArea, ALL);
+        groups.forEach(function (g) {
+            chip(g.label + (g.label !== g.id ? ' [' + g.id + ']' : '') + ' · ' +
+                Object.keys(g.scripts).length, g.id);
+        });
+    }
+
+    function renderAreaList(groups) {
+        var seen = {};
+        var list = [];
+        var inArea = {};
+        groups.forEach(function (g) {
+            g.nodes.forEach(function (r) {
+                links[r.id].forEach(function (l) {
+                    var s = byId[l.other];
+                    if (s.kind !== 'script') { return; }
+                    if (!seen[s.id]) { seen[s.id] = true; list.push(s); inArea[s.id] = []; }
+                    var text = g.label + ' (' + l.kind + ')';
+                    if (inArea[s.id].indexOf(text) === -1) { inArea[s.id].push(text); }
+                });
+            });
+        });
+        list.sort(function (a, b) {
+            return versionRank(a.version) - versionRank(b.version) ||
+                a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path);
+        });
+        recListHeading.hidden = false;
+        recListHeading.textContent = list.length + ' scripts';
+        if (!list.length) {
+            recList.appendChild(el('p', 'empty', 'No scripts found'));
             return;
         }
-        var rec = byId[xRecord.value];
-        if (!rec) {
-            xBody.appendChild(el('p', 'empty', 'No records found'));
-            return;
-        }
-        var deployed = recordScripts(rec, 'deploy');
+        list.forEach(function (s) {
+            var entry = scriptEntry(s);
+            var ul = el('ul');
+            inArea[s.id].forEach(function (text) { ul.appendChild(el('li', null, text)); });
+            addField(entry.querySelector('dl'), 'In this area:', ul);
+            recList.appendChild(entry);
+        });
+    }
+
+    function renderRecordDetail(group) {
+        recNote.hidden = false;
+        var deployed = mergedScripts(group, 'deploy');
         var lanesShown = 0;
         LANES.forEach(function (lane) {
             var inLane = deployed.filter(function (s) { return s.entry_points.indexOf(lane) !== -1; });
@@ -674,28 +790,63 @@ main { padding: 12px 16px; }
             var box = el('div', 'lane');
             box.appendChild(el('h3', null, lane));
             var ul = el('ul');
-            inLane.forEach(function (s) { ul.appendChild(scriptItem(s, false)); });
+            inLane.forEach(function (s) { ul.appendChild(recScriptItem(s)); });
             box.appendChild(ul);
-            xBody.appendChild(box);
+            recDetail.appendChild(box);
         });
         if (!lanesShown) {
-            xBody.appendChild(el('p', 'empty', 'No deployed scripts export a record entry point.'));
+            recDetail.appendChild(el('p', 'empty', 'No deployed scripts export a record entry point.'));
         }
         var other = el('div', 'other');
         other.appendChild(el('h3', null, 'Other scripts that touch this record'));
-        var touching = recordScripts(rec, 'touches');
+        var touching = mergedScripts(group, 'touches');
         if (touching.length) {
             var ul = el('ul');
-            touching.forEach(function (s) { ul.appendChild(scriptItem(s, true)); });
+            touching.forEach(function (s) { ul.appendChild(recScriptItem(s)); });
             other.appendChild(ul);
         } else {
             other.appendChild(el('p', 'empty', 'none'));
         }
-        xBody.appendChild(other);
+        recDetail.appendChild(other);
     }
 
-    xRepo.addEventListener('change', function () { fillRecordPicker(); renderXray(); });
-    xRecord.addEventListener('change', renderXray);
+    function renderRecords() {
+        renderMissing();
+        clear(recCards);
+        clear(recChips);
+        clear(recList);
+        clear(recDetail);
+        recListHeading.hidden = true;
+        recListHeading.textContent = '';
+        recNote.hidden = true;
+        var areas = areaRecords(recRepo.value);
+        var shown = (data.record_categories || []).filter(function (name) { return areas[name]; });
+        if (recArea !== ALL && shown.indexOf(recArea) === -1) {
+            recArea = ALL;
+            recRecord = ALL;
+        }
+        if (recArea !== ALL && recRecord !== ALL && !areas[recArea].groups[recRecord]) {
+            recRecord = ALL;
+        }
+        if (!shown.length) {
+            recChips.appendChild(el('p', 'empty', 'No scripts found'));
+            return;
+        }
+        renderAreaCards(areas, shown);
+        if (recArea === ALL) {
+            recChips.appendChild(el('p', 'note', 'Pick an area to see its record types and scripts.'));
+            return;
+        }
+        var groups = sortedGroups(areas[recArea]);
+        renderChips(groups);
+        if (recRecord === ALL) {
+            renderAreaList(groups);
+        } else {
+            renderRecordDetail(areas[recArea].groups[recRecord]);
+        }
+    }
+
+    recRepo.addEventListener('change', renderRecords);
 
     // Risk grid
     var rRepo = document.getElementById('r-repo');
@@ -776,8 +927,7 @@ main { padding: 12px 16px; }
 
     showView('inventory');
     renderInventory();
-    fillRecordPicker();
-    renderXray();
+    renderRecords();
     renderRisk();
 }());
 </script>

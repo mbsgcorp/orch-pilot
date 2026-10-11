@@ -427,6 +427,50 @@ var u = 'CUSTOMRECORD99';
         data = self.collect_one(repo)
         self.assertIn(("A:UserEvent/ue.js", "A:salesorder", "touches"), self.edges(data))
 
+    def test_record_category(self):
+        cases = {
+            "salesorder": "Sales",
+            "invoice": "Billing / AR",
+            "vendorbill": "Purchasing / AP",
+            "itemreceipt": "Purchasing / AP",
+            "itemfulfillment": "Sales",
+            "inventoryitem": "Items",
+            "assemblyitem": "Items",
+            "lotnumberedassemblyitem": "Items",
+            "item": "Items",
+            "workorder": "Inventory / Manufacturing",
+            "customer": "Entities",
+            "journalentry": "Accounting",
+            "customrecord2326": "Custom records",
+            "customrecord_mbsg_hold": "Custom records",
+            "somethingelse": "Other",
+        }
+        for record_id, area in cases.items():
+            with self.subTest(record_id=record_id):
+                self.assertEqual(script_map.record_category(record_id), area)
+
+    def test_collect_record_categories(self):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/ue.js", USER_EVENT.replace(
+            "record.Type.SALES_ORDER",
+            "record.Type.SALES_ORDER }); search.create({ type: search.Type.INVENTORY_ITEM }); "
+            "record.create({ type: 'customrecord_mbsg_hold' }); "
+            "record.create({ type: 'somethingelse'"))
+        data = self.collect_one(repo)
+        categories = {n["record_id"]: n["category"]
+                      for n in data["nodes"] if n["kind"] == "record"}
+        self.assertEqual(categories, {
+            "customrecord2326": "Custom records",
+            "salesorder": "Sales",
+            "inventoryitem": "Items",
+            "customrecord_mbsg_hold": "Custom records",
+            "somethingelse": "Other",
+        })
+        self.assertEqual(data["record_categories"], [
+            "Sales", "Billing / AR", "Purchasing / AP", "Items",
+            "Inventory / Manufacturing", "Entities", "Accounting", "Custom records", "Other",
+        ])
+
     def test_records_keyed_per_repo(self):
         a = self.make_repo("a")
         b = self.make_repo("b")
@@ -584,12 +628,14 @@ var u = 'CUSTOMRECORD99';
                     "insertAdjacentHTML", "document.write", "eval("):
             self.assertNotIn(bad, text)
         self.assertEqual(text.count(script_map.DATA_TOKEN), 1)
-        for label in ("Inventory", "Record X-ray", "Risk grid", "All clients",
+        for label in ("Inventory", "Records", "Risk grid", "All clients",
                       "All types", "All versions", "Clear filters", "Total scripts",
+                      "Pick an area to see its record types and scripts.", "In this area:",
                       "Other scripts that touch this record", "No scripts found",
                       "Order within a step follows deployment order in NetSuite, "
                       "which isn't in the code.", "prefers-color-scheme"):
             self.assertIn(label, text)
+        self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
         self.assertNotIn("All repos", text)
 
