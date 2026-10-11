@@ -15,10 +15,11 @@ Every *.js file under PATH is scanned (directory symlinks are not followed;
 *.min.js files are excluded). Files are classified as SuiteScript by their
 @NScriptType / @NApiVersion tags or nlapi calls, then parsed for entry points,
 "DEPLOY ON:" record targets, touched record types, define([...]) library
-dependencies, clientScriptModulePath and a simple risk score. The result is
-embedded as JSON in tools/script_map_template.html and written to OUT. On
-success one summary line is printed and the exit code is 0; every input or
-branch error prints to stderr and exits 2.
+dependencies, clientScriptModulePath and a simple risk score. Untagged
+SuiteScript 1.0 files get a script type inferred from their folder names. The
+result is embedded as JSON in tools/script_map_template.html and written to
+OUT. On success one summary line is printed and the exit code is 0; every
+input or branch error prints to stderr and exits 2.
 """
 
 import argparse
@@ -60,6 +61,20 @@ TYPE_BLOCKLIST = {
     "button", "list", "inline", "normal", "entry", "staticlist", "editor",
     "plain", "radio", "inlineeditor",
 }
+
+FOLDER_TYPES = [
+    ("userevent", "UserEventScript"),
+    ("mapreduce", "MapReduceScript"),
+    ("massupdate", "MassUpdateScript"),
+    ("workflow", "WorkflowActionScript"),
+    ("scheduled", "ScheduledScript"),
+    ("suitelet", "Suitelet"),
+    ("restlet", "Restlet"),
+    ("portlet", "Portlet"),
+    ("client", "ClientScript"),
+]
+
+VERSION_BUCKETS = ("1.0", "2.0", "2.x", "2.1")
 
 SCRIPT_TYPE_RE = re.compile(r"@NScriptType\s+(\w+)")
 API_VERSION_RE = re.compile(r"@NApiVersion\s+([^\s*]+)")
@@ -130,6 +145,30 @@ def classify(text):
     else:
         api_version = ""
     return True, script_type, api_version
+
+
+def infer_type_from_path(rel_path):
+    """Return the script type named by the deepest matching folder of rel_path, or None.
+
+    Only directory segments are checked (never the file name); each is reduced to
+    lowercase letters and matched against the FOLDER_TYPES keywords in order.
+    """
+    for segment in reversed(rel_path.split("/")[:-1]):
+        normalized = re.sub(r"[^a-z]", "", segment.lower())
+        for keyword, script_type in FOLDER_TYPES:
+            if keyword in normalized:
+                return script_type
+    return None
+
+
+def version_bucket(api_version):
+    """Return "1.0", "2.0", "2.x", "2.1", "None" (empty) or "Other" for an API version."""
+    value = (api_version or "").strip().lower()
+    if value in VERSION_BUCKETS:
+        return value
+    if not value:
+        return "None"
+    return "Other"
 
 
 def entry_points(text):
@@ -374,6 +413,12 @@ def collect(repos):
                                       "repo": label, "label": path})
                     add_edge(node_id, target, kind)
 
+            type_inferred = False
+            if script_type == "SuiteScript 1.0":
+                inferred = infer_type_from_path(rel)
+                type_inferred = inferred is not None
+                script_type = inferred or "Unknown"
+
             script_nodes.append({
                 "id": node_id,
                 "kind": "script",
@@ -381,7 +426,9 @@ def collect(repos):
                 "path": rel,
                 "name": rel.rsplit("/", 1)[-1],
                 "type": script_type,
+                "type_inferred": type_inferred,
                 "api_version": api_version,
+                "version": version_bucket(api_version),
                 "entry_points": entry_points(text),
                 "modules": modules,
                 "has_deploy_line": bool(DEPLOY_RE.search(text)),

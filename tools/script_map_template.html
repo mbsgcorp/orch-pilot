@@ -71,7 +71,7 @@ header h1 { font-size: 18px; margin: 0; }
 }
 .chip.unverified { border-color: var(--medium-border); }
 nav { display: flex; gap: 4px; margin-left: auto; }
-nav button, .controls select, .controls input, .detail-link {
+nav button, .controls select, .controls button {
     font: inherit;
     color: var(--text);
     background: var(--panel);
@@ -79,57 +79,75 @@ nav button, .controls select, .controls input, .detail-link {
     border-radius: 6px;
     padding: 4px 10px;
 }
-nav button { cursor: pointer; }
+nav button, .controls button { cursor: pointer; }
 nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 main { padding: 12px 16px; }
 .view[hidden] { display: none; }
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .empty { color: var(--muted); font-style: italic; }
-#legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.legend-item { display: inline-flex; align-items: center; gap: 4px; }
-.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
-.line-swatch { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--edge); }
-.line-swatch.touches { border-top-style: dashed; }
-.line-swatch.library { border-top-style: dotted; }
-.graph-layout { display: flex; gap: 12px; align-items: stretch; }
-.graph-wrap {
-    flex: 1;
-    min-width: 0;
+#i-tiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.tile {
+    flex: 0 1 140px;
+    min-width: 110px;
+    border: 1px solid var(--border);
+    border-left-width: 5px;
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 6px 10px;
+}
+.tile.high { background: var(--high-bg); border-left-color: var(--high-border); }
+.tile.medium { background: var(--medium-bg); border-left-color: var(--medium-border); }
+.tile .tile-label { color: var(--muted); font-size: 12px; }
+.tile .tile-value { font-size: 20px; font-weight: 600; }
+.tile .tile-pct { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.matrix-wrap {
+    overflow-x: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
-    position: relative;
+    margin-bottom: 12px;
 }
-#graph-empty { position: absolute; top: 12px; left: 12px; }
-#graph { width: 100%; height: 70vh; display: block; touch-action: none; cursor: grab; }
-#graph .edge { stroke: var(--edge); stroke-width: 1.2; fill: none; }
-#graph .edge.touches { stroke-dasharray: 6 4; }
-#graph .edge.library, #graph .edge.client { stroke-dasharray: 2 3; }
-#graph .node circle { stroke: var(--panel); stroke-width: 1.5; cursor: pointer; }
-#graph .node.record circle { fill: var(--record); }
-#graph .node.unresolved circle { fill: var(--unresolved); }
-#graph .node text { fill: var(--text); font-size: 11px; pointer-events: none; }
-#graph .node.script text { font-size: 9px; fill: var(--muted); }
-#graph .node.match circle { stroke: var(--accent); stroke-width: 4; }
-#graph .node.selected circle { stroke: var(--text); stroke-width: 3; }
-#graph .dim { opacity: 0.12; }
-#graph .edge.hl { stroke: var(--accent); stroke-width: 2; }
-#detail {
-    width: 320px;
-    flex-shrink: 0;
+.matrix-wrap .empty { margin: 8px 12px; }
+.matrix { border-collapse: collapse; width: 100%; }
+.matrix th, .matrix td {
+    border-bottom: 1px solid var(--border);
+    padding: 4px 10px;
+    text-align: right;
+    white-space: nowrap;
+}
+.matrix th.row-label { text-align: left; }
+.matrix tr.totals th, .matrix tr.totals td, .matrix .total { font-weight: 600; }
+.matrix button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: inherit;
+}
+.matrix .short { font-weight: 600; margin-right: 6px; }
+.matrix .full { color: var(--muted); }
+.matrix td.v-high { background: var(--high-bg); box-shadow: inset 0 0 0 1px var(--high-border); }
+.matrix td.v-medium { background: var(--medium-bg); box-shadow: inset 0 0 0 1px var(--medium-border); }
+.matrix td.zero { color: var(--muted); }
+.matrix .sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.matrix .in-sel { color: var(--accent); font-weight: 700; }
+#i-list-heading { font-size: 15px; margin: 0 0 8px; }
+#i-list details {
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--panel);
-    padding: 10px 12px;
-    max-height: 70vh;
-    overflow: auto;
+    padding: 6px 10px;
+    margin-bottom: 6px;
 }
-#detail h2 { font-size: 15px; margin: 0 0 8px; word-break: break-word; }
-#detail dl { margin: 0; }
-#detail dt { font-weight: 600; margin-top: 6px; }
-#detail dd { margin: 2px 0 0; word-break: break-word; }
-#detail ul { margin: 2px 0 0; padding-left: 18px; }
-.detail-link { padding: 0 4px; cursor: pointer; text-align: left; }
+#i-list summary { cursor: pointer; }
+#i-list .name { font-weight: 600; word-break: break-word; }
+#i-list .path { display: block; margin-left: 0; }
+#i-list dl { margin: 6px 0 0; }
+#i-list dt { font-weight: 600; margin-top: 6px; }
+#i-list dd { margin: 2px 0 0; word-break: break-word; }
+#i-list dd ul { margin: 0; padding-left: 18px; }
 .kind { color: var(--muted); font-size: 12px; }
 .note { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
 .lane, .other {
@@ -173,9 +191,9 @@ main { padding: 12px 16px; }
     nav { margin-left: 0; flex-wrap: wrap; }
     main { padding: 8px; }
     .controls { flex-direction: column; align-items: stretch; }
-    .graph-layout { flex-direction: column; }
-    #graph { height: 60vh; }
-    #detail { width: auto; max-height: none; }
+    #i-tiles { flex-wrap: wrap; }
+    .tile { flex: 1 1 100px; }
+    .matrix-wrap { overflow-x: auto; max-width: 100%; }
     #skipped { margin: 8px; }
 }
 </style>
@@ -186,25 +204,23 @@ main { padding: 12px 16px; }
     <span id="generated"></span>
     <div id="repo-chips"></div>
     <nav>
-        <button type="button" data-view="constellation">Constellation</button>
+        <button type="button" data-view="inventory">Inventory</button>
         <button type="button" data-view="xray">Record X-ray</button>
         <button type="button" data-view="risk">Risk grid</button>
     </nav>
 </header>
 <main>
-    <section id="view-constellation" class="view">
+    <section id="view-inventory" class="view">
         <div class="controls">
-            <select id="c-repo" aria-label="Repo filter"></select>
-            <input id="c-search" type="search" placeholder="Search names" aria-label="Search names">
+            <select id="i-repo" aria-label="Client filter"></select>
+            <select id="i-type" aria-label="Script type filter"></select>
+            <select id="i-version" aria-label="Version filter"></select>
+            <button type="button" id="i-clear">Clear filters</button>
         </div>
-        <div id="legend"></div>
-        <div class="graph-layout">
-            <div class="graph-wrap">
-                <p id="graph-empty" class="empty" hidden>No scripts found</p>
-                <svg id="graph" role="img" aria-label="Script graph"><g id="graph-root"><g id="graph-edges"></g><g id="graph-nodes"></g></g></svg>
-            </div>
-            <aside id="detail"><p class="empty">Click a node to see details.</p></aside>
-        </div>
+        <div id="i-tiles"></div>
+        <div class="matrix-wrap"><div id="i-matrix"></div></div>
+        <h2 id="i-list-heading"></h2>
+        <div id="i-list"></div>
     </section>
     <section id="view-xray" class="view" hidden>
         <div class="controls">
@@ -229,19 +245,15 @@ main { padding: 12px 16px; }
     'use strict';
 
     var data = JSON.parse(document.getElementById('script-map-data').textContent);
-    var MAX_TICKS = 600;
     var LANES = ['beforeLoad', 'beforeSubmit', 'afterSubmit', 'pageInit', 'fieldChanged',
         'postSourcing', 'sublistChanged', 'lineInit', 'validateField', 'validateLine',
         'validateInsert', 'validateDelete', 'saveRecord'];
-    var PALETTE = ['#2b6cb0', '#d0602a', '#2f8a4e', '#8e44ad', '#c0392b', '#1a9c9c',
-        '#b7950b', '#d6488c', '#5d6d7e', '#6c5ce7', '#7f8c1d', '#a0522d'];
+    var TYPE_LABELS = [['UE', 'UserEventScript'], ['CS', 'ClientScript'], ['SL', 'Suitelet'],
+        ['MR', 'MapReduceScript'], ['SS', 'ScheduledScript'], ['RL', 'Restlet'],
+        ['PL', 'Portlet'], ['WA', 'WorkflowActionScript'], ['MU', 'MassUpdateScript']];
+    var VERSIONS = ['1.0', '2.0', '2.x', '2.1', 'Other', 'None'];
+    var BASE_VERSIONS = ['1.0', '2.0', '2.x', '2.1'];
     var ALL = '';
-
-    var graphEl = document.getElementById('graph');
-    var SVG_NS = graphEl.namespaceURI;
-    var rootG = document.getElementById('graph-root');
-    var edgesG = document.getElementById('graph-edges');
-    var nodesG = document.getElementById('graph-nodes');
 
     var nodes = data.nodes || [];
     var edges = data.edges || [];
@@ -256,12 +268,6 @@ main { padding: 12px 16px; }
     var scripts = nodes.filter(function (n) { return n.kind === 'script'; });
     var records = nodes.filter(function (n) { return n.kind === 'record'; });
 
-    var types = [];
-    scripts.forEach(function (s) { if (types.indexOf(s.type) === -1) { types.push(s.type); } });
-    types.sort();
-    var typeColor = {};
-    types.forEach(function (t, i) { typeColor[t] = PALETTE[i % PALETTE.length]; });
-
     function el(tag, className, text) {
         var node = document.createElement(tag);
         if (className) { node.className = className; }
@@ -273,12 +279,6 @@ main { padding: 12px 16px; }
         while (node.firstChild) { node.removeChild(node.firstChild); }
     }
 
-    function svgEl(tag, attrs) {
-        var node = document.createElementNS(SVG_NS, tag);
-        Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, attrs[k]); });
-        return node;
-    }
-
     function inRepo(node, repo) { return repo === ALL || node.repo === repo; }
 
     function deployCount(script) {
@@ -287,7 +287,7 @@ main { padding: 12px 16px; }
 
     function fillRepoSelect(select) {
         clear(select);
-        var all = el('option', null, 'All repos');
+        var all = el('option', null, 'All clients');
         all.value = ALL;
         select.appendChild(all);
         (data.repos || []).forEach(function (r) {
@@ -310,7 +310,7 @@ main { padding: 12px 16px; }
         chips.appendChild(chip);
     });
 
-    var views = { constellation: 'view-constellation', xray: 'view-xray', risk: 'view-risk' };
+    var views = { inventory: 'view-inventory', xray: 'view-xray', risk: 'view-risk' };
     var navButtons = document.querySelectorAll('nav button');
     function showView(name) {
         Object.keys(views).forEach(function (k) {
@@ -319,203 +319,185 @@ main { padding: 12px 16px; }
         Array.prototype.forEach.call(navButtons, function (b) {
             b.classList.toggle('active', b.getAttribute('data-view') === name);
         });
-        if (name === 'constellation') { ensureViewport(); }
     }
     Array.prototype.forEach.call(navButtons, function (b) {
         b.addEventListener('click', function () { showView(b.getAttribute('data-view')); });
     });
 
-    // Constellation
-    var cRepo = document.getElementById('c-repo');
-    var cSearch = document.getElementById('c-search');
-    var detail = document.getElementById('detail');
-    var graphEmpty = document.getElementById('graph-empty');
-    fillRepoSelect(cRepo);
+    // Inventory
+    var iRepo = document.getElementById('i-repo');
+    var iType = document.getElementById('i-type');
+    var iVersion = document.getElementById('i-version');
+    var iClear = document.getElementById('i-clear');
+    var iTiles = document.getElementById('i-tiles');
+    var iMatrix = document.getElementById('i-matrix');
+    var iListHeading = document.getElementById('i-list-heading');
+    var iList = document.getElementById('i-list');
+    var filter = { type: ALL, version: ALL };
+    fillRepoSelect(iRepo);
 
-    var legend = document.getElementById('legend');
-    function legendItem(swatch, text) {
-        var item = el('span', 'legend-item');
-        item.appendChild(swatch);
-        item.appendChild(document.createTextNode(text));
-        legend.appendChild(item);
-    }
-    types.forEach(function (t) {
-        var s = el('span', 'swatch');
-        s.style.background = typeColor[t];
-        legendItem(s, t);
-    });
-    var recSwatch = el('span', 'swatch');
-    recSwatch.style.background = 'var(--record)';
-    legendItem(recSwatch, 'Record');
-    var unSwatch = el('span', 'swatch');
-    unSwatch.style.background = 'var(--unresolved)';
-    legendItem(unSwatch, 'Unresolved');
-    legendItem(el('span', 'line-swatch'), 'deploy');
-    legendItem(el('span', 'line-swatch touches'), 'touches');
-    legendItem(el('span', 'line-swatch library'), 'library / client');
+    var shortLabels = {};
+    TYPE_LABELS.forEach(function (pair, i) { shortLabels[pair[1]] = { label: pair[0], rank: i }; });
 
-    var view = { x: 0, y: 0, k: 1, ready: false };
-    var sim = { nodes: [], edges: [], index: {}, tick: 0, alpha: 1, frame: 0 };
-    var selectedId = null;
-
-    function applyTransform() {
-        rootG.setAttribute('transform',
-            'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')');
+    function typeRank(t) {
+        if (shortLabels[t]) { return shortLabels[t].rank; }
+        if (t === 'Library') { return TYPE_LABELS.length + 1; }
+        if (t === 'Unknown') { return TYPE_LABELS.length + 2; }
+        return TYPE_LABELS.length;
     }
 
-    function ensureViewport() {
-        if (view.ready) { return; }
-        var rect = graphEl.getBoundingClientRect();
-        if (!rect.width) { return; }
-        view.x = rect.width / 2;
-        view.y = rect.height / 2;
-        view.ready = true;
-        applyTransform();
+    function compareTypes(a, b) {
+        return typeRank(a) - typeRank(b) || (a < b ? -1 : a > b ? 1 : 0);
     }
 
-    function nodeRadius(n) {
-        if (n.kind === 'record') { return 12; }
-        if (n.kind === 'unresolved') { return 5; }
-        return 6;
+    function versionRank(v) {
+        var i = VERSIONS.indexOf(v);
+        return i === -1 ? VERSIONS.length : i;
     }
 
-    function nodeLabel(n) {
-        if (n.kind === 'script') { return n.name; }
-        return n.label;
+    function shortType(t) { return shortLabels[t] ? shortLabels[t].label : t; }
+
+    function typeText(t) { return shortLabels[t] ? shortLabels[t].label + ' ' + t : t; }
+
+    function distinct(list, key) {
+        var out = [];
+        list.forEach(function (s) { if (out.indexOf(s[key]) === -1) { out.push(s[key]); } });
+        return out;
     }
 
-    function buildGraph() {
-        if (sim.frame) { cancelAnimationFrame(sim.frame); sim.frame = 0; }
-        clear(edgesG);
-        clear(nodesG);
-        var repo = cRepo.value;
-        var visible = nodes.filter(function (n) { return inRepo(n, repo); });
-        graphEmpty.hidden = visible.some(function (n) { return n.kind === 'script'; });
-        sim.index = {};
-        sim.nodes = visible.map(function (n, i) {
-            var angle = i * 2.399963;
-            var radius = 12 * Math.sqrt(i + 1);
-            var s = { id: n.id, data: n, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius,
-                vx: 0, vy: 0, r: nodeRadius(n) };
-            sim.index[n.id] = s;
-            return s;
+    function fillFilter(select, allText, values, current, label) {
+        clear(select);
+        var all = el('option', null, allText);
+        all.value = ALL;
+        select.appendChild(all);
+        values.forEach(function (v) {
+            var opt = el('option', null, label ? label(v) : v);
+            opt.value = v;
+            select.appendChild(opt);
         });
-        sim.edges = [];
-        edges.forEach(function (e) {
-            var a = sim.index[e.source];
-            var b = sim.index[e.target];
-            if (!a || !b) { return; }
-            var line = svgEl('line', { 'class': 'edge ' + e.kind });
-            edgesG.appendChild(line);
-            sim.edges.push({ a: a, b: b, kind: e.kind, edge: e, line: line });
-        });
-        sim.nodes.forEach(function (s) {
-            var n = s.data;
-            var g = svgEl('g', { 'class': 'node ' + n.kind });
-            var circle = svgEl('circle', { r: s.r });
-            if (n.kind === 'script') { circle.setAttribute('fill', typeColor[n.type]); }
-            var label = svgEl('text', { x: s.r + 3, y: 4 });
-            label.textContent = nodeLabel(n);
-            var tip = svgEl('title');
-            tip.textContent = n.kind === 'script' ? n.repo + ': ' + n.path : n.repo + ': ' + nodeLabel(n);
-            g.appendChild(circle);
-            g.appendChild(label);
-            g.appendChild(tip);
-            g.setAttribute('data-id', n.id);
-            nodesG.appendChild(g);
-            s.g = g;
-        });
-        sim.tick = 0;
-        sim.alpha = 1;
-        render();
-        applySearch();
-        applySelection();
-        sim.frame = requestAnimationFrame(step);
+        select.value = values.indexOf(current) !== -1 ? current : ALL;
+        return select.value;
     }
 
-    function step() {
-        sim.frame = 0;
-        var list = sim.nodes;
-        var count = list.length;
-        var alpha = sim.alpha;
-        var i, j, a, b, dx, dy, d2, d, f;
-        for (i = 0; i < count; i++) {
-            a = list[i];
-            for (j = i + 1; j < count; j++) {
-                b = list[j];
-                dx = b.x - a.x;
-                dy = b.y - a.y;
-                d2 = dx * dx + dy * dy;
-                if (d2 < 1) { dx = (i - j) * 0.1 + 0.1; dy = 0.1; d2 = 1; }
-                if (d2 > 250000) { continue; }
-                f = 900 * alpha / d2;
-                d = Math.sqrt(d2);
-                a.vx -= dx / d * f; a.vy -= dy / d * f;
-                b.vx += dx / d * f; b.vy += dy / d * f;
-            }
+    function clientScripts() {
+        var repo = iRepo.value;
+        return scripts.filter(function (s) { return inRepo(s, repo); });
+    }
+
+    function renderTiles(list) {
+        clear(iTiles);
+        var total = list.length;
+        function tile(label, value, pct, tone) {
+            var box = el('div', 'tile' + (tone ? ' ' + tone : ''));
+            box.appendChild(el('div', 'tile-label', label));
+            var line = el('div');
+            line.appendChild(el('span', 'tile-value', value));
+            if (pct !== null) { line.appendChild(el('span', 'tile-pct', pct + '%')); }
+            box.appendChild(line);
+            iTiles.appendChild(box);
         }
-        sim.edges.forEach(function (e) {
-            dx = e.b.x - e.a.x;
-            dy = e.b.y - e.a.y;
-            d = Math.sqrt(dx * dx + dy * dy) || 1;
-            var target = e.kind === 'deploy' ? 50 : 70;
-            f = (d - target) * 0.04 * alpha;
-            e.a.vx += dx / d * f; e.a.vy += dy / d * f;
-            e.b.vx -= dx / d * f; e.b.vy -= dy / d * f;
+        tile('Total scripts', total, null, '');
+        BASE_VERSIONS.forEach(function (v) {
+            var count = list.filter(function (s) { return s.version === v; }).length;
+            var pct = total ? Math.round(count * 100 / total) : 0;
+            tile(v, count, pct, v === '1.0' ? 'high' : v === '2.0' ? 'medium' : '');
         });
+    }
+
+    function setFilter(type, version) {
+        filter.type = type;
+        filter.version = version;
+        iType.value = type;
+        iVersion.value = version;
+        renderFiltered();
+    }
+
+    function renderMatrix(list) {
+        clear(iMatrix);
+        if (!list.length) {
+            iMatrix.appendChild(el('p', 'empty', 'No scripts found'));
+            return;
+        }
+        var rows = distinct(list, 'type').sort(compareTypes);
+        var columns = BASE_VERSIONS.slice();
+        ['Other', 'None'].forEach(function (v) {
+            if (list.some(function (s) { return s.version === v; })) { columns.push(v); }
+        });
+        var counts = {};
         list.forEach(function (s) {
-            s.vx -= s.x * 0.01 * alpha;
-            s.vy -= s.y * 0.01 * alpha;
-            s.vx *= 0.6;
-            s.vy *= 0.6;
-            s.x += s.vx;
-            s.y += s.vy;
+            var key = s.type + '\n' + s.version;
+            counts[key] = (counts[key] || 0) + 1;
         });
-        sim.alpha *= 0.992;
-        sim.tick += 1;
-        render();
-        if (sim.tick < MAX_TICKS && sim.alpha > 0.01) {
-            sim.frame = requestAnimationFrame(step);
-        }
-    }
+        function count(t, v) { return counts[t + '\n' + v] || 0; }
+        var typeOnly = filter.type !== ALL && filter.version === ALL;
+        var versionOnly = filter.version !== ALL && filter.type === ALL;
 
-    function render() {
-        sim.edges.forEach(function (e) {
-            e.line.setAttribute('x1', e.a.x.toFixed(1));
-            e.line.setAttribute('y1', e.a.y.toFixed(1));
-            e.line.setAttribute('x2', e.b.x.toFixed(1));
-            e.line.setAttribute('y2', e.b.y.toFixed(1));
+        var table = el('table', 'matrix');
+        var head = el('tr');
+        head.appendChild(el('th', 'row-label', 'Type'));
+        columns.forEach(function (v) {
+            var th = el('th', versionOnly && filter.version === v ? 'sel' : null);
+            var btn = el('button', null, v);
+            btn.type = 'button';
+            btn.setAttribute('title', 'Show all ' + v + ' scripts');
+            btn.addEventListener('click', function () { setFilter(ALL, v); });
+            th.appendChild(btn);
+            head.appendChild(th);
         });
-        sim.nodes.forEach(function (s) {
-            s.g.setAttribute('transform', 'translate(' + s.x.toFixed(1) + ',' + s.y.toFixed(1) + ')');
-        });
-    }
+        head.appendChild(el('th', 'total', 'Total'));
+        table.appendChild(head);
 
-    function applySearch() {
-        var q = cSearch.value.trim().toLowerCase();
-        sim.nodes.forEach(function (s) {
-            var n = s.data;
-            var hay = (nodeLabel(n) + ' ' + (n.path || '') + ' ' + (n.record_id || '')).toLowerCase();
-            s.g.classList.toggle('match', q !== '' && hay.indexOf(q) !== -1);
+        rows.forEach(function (t) {
+            var tr = el('tr');
+            var th = el('th', 'row-label' + (typeOnly && filter.type === t ? ' sel' : ''));
+            var btn = el('button');
+            btn.type = 'button';
+            if (shortLabels[t]) { btn.appendChild(el('span', 'short', shortLabels[t].label)); }
+            btn.appendChild(el('span', shortLabels[t] ? 'full' : null, t));
+            btn.addEventListener('click', function () { setFilter(t, ALL); });
+            th.appendChild(btn);
+            tr.appendChild(th);
+            var rowTotal = 0;
+            columns.forEach(function (v) {
+                var n = count(t, v);
+                rowTotal += n;
+                if (!n) {
+                    tr.appendChild(el('td', 'zero', '–'));
+                    return;
+                }
+                var cls = v === '1.0' ? 'v-high' : v === '2.0' ? 'v-medium' : '';
+                if (filter.type === t && filter.version === v) {
+                    cls += ' sel';
+                } else if ((typeOnly && filter.type === t) || (versionOnly && filter.version === v)) {
+                    cls += ' in-sel';
+                }
+                var td = el('td', cls);
+                var cell = el('button', null, n);
+                cell.type = 'button';
+                cell.setAttribute('title', t + ' · ' + v);
+                cell.addEventListener('click', function () {
+                    if (filter.type === t && filter.version === v) {
+                        setFilter(ALL, ALL);
+                    } else {
+                        setFilter(t, v);
+                    }
+                });
+                td.appendChild(cell);
+                tr.appendChild(td);
+            });
+            tr.appendChild(el('td', 'total', rowTotal));
+            table.appendChild(tr);
         });
-    }
 
-    function applySelection() {
-        var keep = {};
-        if (selectedId && sim.index[selectedId]) {
-            keep[selectedId] = true;
-            links[selectedId].forEach(function (l) { keep[l.other] = true; });
-        }
-        var active = selectedId && sim.index[selectedId];
-        sim.nodes.forEach(function (s) {
-            s.g.classList.toggle('selected', s.id === selectedId);
-            s.g.classList.toggle('dim', !!active && !keep[s.id]);
+        var totals = el('tr', 'totals');
+        totals.appendChild(el('th', 'row-label', 'Total'));
+        columns.forEach(function (v) {
+            totals.appendChild(el('td', null,
+                list.filter(function (s) { return s.version === v; }).length));
         });
-        sim.edges.forEach(function (e) {
-            var touching = active && (e.a.id === selectedId || e.b.id === selectedId);
-            e.line.classList.toggle('hl', !!touching);
-            e.line.classList.toggle('dim', !!active && !touching);
-        });
+        totals.appendChild(el('td', null, list.length));
+        table.appendChild(totals);
+        iMatrix.appendChild(table);
     }
 
     function addField(dl, label, value) {
@@ -525,151 +507,81 @@ main { padding: 12px 16px; }
         dl.appendChild(dd);
     }
 
-    function linkList(items) {
+    function recordList(s) {
+        var items = links[s.id].filter(function (l) { return byId[l.other].kind === 'record'; });
         if (!items.length) { return el('span', 'empty', 'none'); }
         var ul = el('ul');
         items.forEach(function (l) {
-            var other = byId[l.other];
-            var li = el('li');
-            var btn = el('button', 'detail-link', nodeLabel(other));
-            btn.type = 'button';
-            btn.addEventListener('click', function () { selectNode(other.id); });
-            li.appendChild(btn);
+            var li = el('li', null, byId[l.other].label);
             li.appendChild(el('span', 'kind', ' ' + l.kind));
             ul.appendChild(li);
         });
         return ul;
     }
 
-    function showDetail(n) {
-        clear(detail);
-        if (!n) {
-            detail.appendChild(el('p', 'empty', 'Click a node to see details.'));
+    function scriptEntry(s) {
+        var details = el('details');
+        details.setAttribute('data-id', s.id);
+        var summary = el('summary');
+        summary.appendChild(el('span', 'name', s.name));
+        summary.appendChild(el('span', 'kind', ' · ' + s.repo + ' · '));
+        var type = el('span', null, shortType(s.type));
+        type.setAttribute('title', s.type);
+        summary.appendChild(type);
+        if (s.type_inferred) { summary.appendChild(el('span', 'badge', 'inferred')); }
+        summary.appendChild(el('span', 'kind', ' · ' + s.version + ' · ' + s.risk.level + ' risk'));
+        summary.appendChild(el('span', 'path', s.path));
+        details.appendChild(summary);
+        var dl = el('dl');
+        addField(dl, 'Type', s.type + (s.type_inferred ? ' (inferred from folder)' : ''));
+        addField(dl, 'Entry points', s.entry_points.length ? s.entry_points.join(', ') : 'none');
+        addField(dl, 'N/ modules', s.modules.length ? s.modules.join(', ') : 'none');
+        addField(dl, 'Records', recordList(s));
+        addField(dl, 'Risk reasons', s.risk.reasons.length ? s.risk.reasons.join(', ') : 'none');
+        details.appendChild(dl);
+        return details;
+    }
+
+    function renderList(list) {
+        clear(iList);
+        var shown = list.filter(function (s) {
+            return (filter.type === ALL || s.type === filter.type) &&
+                (filter.version === ALL || s.version === filter.version);
+        });
+        shown.sort(function (a, b) {
+            return versionRank(a.version) - versionRank(b.version) ||
+                a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path);
+        });
+        iListHeading.textContent = shown.length + ' scripts';
+        if (!shown.length) {
+            iList.appendChild(el('p', 'empty', 'No scripts found'));
             return;
         }
-        detail.appendChild(el('h2', null, nodeLabel(n)));
-        var dl = el('dl');
-        addField(dl, 'Repo', n.repo);
-        var mine = links[n.id];
-        if (n.kind === 'script') {
-            addField(dl, 'Path', n.path);
-            addField(dl, 'Type', n.type);
-            addField(dl, 'API version', n.api_version || 'none');
-            addField(dl, 'Entry points', n.entry_points.length ? n.entry_points.join(', ') : 'none');
-            addField(dl, 'N/ modules', n.modules.length ? n.modules.join(', ') : 'none');
-            addField(dl, 'Records', linkList(mine.filter(function (l) {
-                return byId[l.other].kind === 'record';
-            })));
-            addField(dl, 'Dependencies', linkList(mine.filter(function (l) {
-                return byId[l.other].kind !== 'record';
-            })));
-            addField(dl, 'Risk', n.risk.level + ' (score ' + n.risk.score + ')');
-            addField(dl, 'Risk reasons', n.risk.reasons.length ? n.risk.reasons.join(', ') : 'none');
-        } else if (n.kind === 'record') {
-            addField(dl, 'Id', n.record_id);
-            addField(dl, 'Label', n.label);
-            addField(dl, 'Scripts', linkList(mine));
-        } else {
-            addField(dl, 'Path', n.label);
-            addField(dl, 'Status', 'unresolved dependency');
-            addField(dl, 'Referenced by', linkList(mine));
-        }
-        detail.appendChild(dl);
+        shown.forEach(function (s) { iList.appendChild(scriptEntry(s)); });
     }
 
-    function selectNode(id) {
-        selectedId = id;
-        applySelection();
-        showDetail(id ? byId[id] : null);
+    function renderFiltered() {
+        var list = clientScripts();
+        renderMatrix(list);
+        renderList(list);
     }
 
-    cRepo.addEventListener('change', function () {
-        if (selectedId && !inRepo(byId[selectedId], cRepo.value)) { selectNode(null); }
-        buildGraph();
-    });
-    cSearch.addEventListener('input', applySearch);
-
-    // Pan, zoom and click handling
-    var pointers = {};
-    var gesture = null;
-
-    function localPoint(clientX, clientY) {
-        var rect = graphEl.getBoundingClientRect();
-        return { x: clientX - rect.left, y: clientY - rect.top };
+    function renderInventory() {
+        var list = clientScripts();
+        filter.type = fillFilter(iType, 'All types', distinct(list, 'type').sort(compareTypes),
+            filter.type, typeText);
+        filter.version = fillFilter(iVersion, 'All versions',
+            distinct(list, 'version').sort(function (a, b) { return versionRank(a) - versionRank(b); }),
+            filter.version);
+        renderTiles(list);
+        renderMatrix(list);
+        renderList(list);
     }
 
-    function zoomAt(px, py, factor) {
-        var k = Math.min(8, Math.max(0.1, view.k * factor));
-        var f = k / view.k;
-        view.x = px - (px - view.x) * f;
-        view.y = py - (py - view.y) * f;
-        view.k = k;
-        applyTransform();
-    }
-
-    function pointerList() {
-        return Object.keys(pointers).map(function (k) { return pointers[k]; });
-    }
-
-    graphEl.addEventListener('wheel', function (ev) {
-        ev.preventDefault();
-        var p = localPoint(ev.clientX, ev.clientY);
-        zoomAt(p.x, p.y, Math.exp(-ev.deltaY * 0.0015));
-    }, { passive: false });
-
-    graphEl.addEventListener('pointerdown', function (ev) {
-        var nodeG = ev.target.closest ? ev.target.closest('.node') : null;
-        pointers[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
-        graphEl.setPointerCapture(ev.pointerId);
-        var list = pointerList();
-        if (list.length === 1) {
-            gesture = { mode: 'pan', startX: ev.clientX, startY: ev.clientY, moved: false,
-                nodeId: nodeG ? nodeG.getAttribute('data-id') : null };
-        } else if (list.length === 2) {
-            var dx = list[0].x - list[1].x;
-            var dy = list[0].y - list[1].y;
-            gesture = { mode: 'pinch', dist: Math.sqrt(dx * dx + dy * dy) || 1, moved: true };
-        }
-    });
-
-    graphEl.addEventListener('pointermove', function (ev) {
-        var prev = pointers[ev.pointerId];
-        if (!prev || !gesture) { return; }
-        var cur = { x: ev.clientX, y: ev.clientY };
-        pointers[ev.pointerId] = cur;
-        if (gesture.mode === 'pan') {
-            if (Math.abs(cur.x - gesture.startX) + Math.abs(cur.y - gesture.startY) > 4) {
-                gesture.moved = true;
-            }
-            view.x += cur.x - prev.x;
-            view.y += cur.y - prev.y;
-            applyTransform();
-        } else if (gesture.mode === 'pinch') {
-            var list = pointerList();
-            if (list.length < 2) { return; }
-            var dx = list[0].x - list[1].x;
-            var dy = list[0].y - list[1].y;
-            var dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            var mid = localPoint((list[0].x + list[1].x) / 2, (list[0].y + list[1].y) / 2);
-            zoomAt(mid.x, mid.y, dist / gesture.dist);
-            gesture.dist = dist;
-        }
-    });
-
-    function endPointer(ev) {
-        if (!pointers[ev.pointerId]) { return; }
-        delete pointers[ev.pointerId];
-        if (gesture && gesture.mode === 'pan' && !gesture.moved && ev.type === 'pointerup') {
-            selectNode(gesture.nodeId);
-        }
-        gesture = null;
-        var rest = pointerList();
-        if (rest.length === 1) {
-            gesture = { mode: 'pan', startX: rest[0].x, startY: rest[0].y, moved: true, nodeId: null };
-        }
-    }
-    graphEl.addEventListener('pointerup', endPointer);
-    graphEl.addEventListener('pointercancel', endPointer);
+    iRepo.addEventListener('change', renderInventory);
+    iType.addEventListener('change', function () { setFilter(iType.value, filter.version); });
+    iVersion.addEventListener('change', function () { setFilter(filter.type, iVersion.value); });
+    iClear.addEventListener('click', function () { setFilter(ALL, ALL); });
 
     // Record X-ray
     var xRepo = document.getElementById('x-repo');
@@ -790,14 +702,20 @@ main { padding: 12px 16px; }
     var rGrid = document.getElementById('r-grid');
     fillRepoSelect(rRepo);
 
-    function openInConstellation(s) {
-        if (!inRepo(s, cRepo.value)) {
-            cRepo.value = ALL;
-            selectedId = null;
-            buildGraph();
+    function openInInventory(s) {
+        iRepo.value = s.repo;
+        filter.type = s.type;
+        filter.version = s.version;
+        showView('inventory');
+        renderInventory();
+        var entries = iList.querySelectorAll('details');
+        for (var i = 0; i < entries.length; i++) {
+            if (entries[i].getAttribute('data-id') === s.id) {
+                entries[i].open = true;
+                entries[i].scrollIntoView();
+                break;
+            }
         }
-        showView('constellation');
-        selectNode(s.id);
     }
 
     function renderRisk() {
@@ -826,9 +744,9 @@ main { padding: 12px 16px; }
                 ul.appendChild(el('li', null, 'no risk factors'));
             }
             card.appendChild(ul);
-            card.addEventListener('click', function () { openInConstellation(s); });
+            card.addEventListener('click', function () { openInInventory(s); });
             card.addEventListener('keydown', function (ev) {
-                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openInConstellation(s); }
+                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openInInventory(s); }
             });
             rGrid.appendChild(card);
         });
@@ -856,8 +774,8 @@ main { padding: 12px 16px; }
         skippedBody.appendChild(table);
     }
 
-    showView('constellation');
-    buildGraph();
+    showView('inventory');
+    renderInventory();
     fillRecordPicker();
     renderXray();
     renderRisk();

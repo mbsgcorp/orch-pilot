@@ -314,7 +314,47 @@ class ScriptMapTest(unittest.TestCase):
         data = self.collect_one(repo)
         self.assertEqual(data["skipped"],
                          [{"repo": "A", "path": "plain.js", "reason": "not SuiteScript"}])
-        self.assertEqual(self.scripts(data)["v1.js"]["type"], "SuiteScript 1.0")
+        self.assertEqual(self.scripts(data)["v1.js"]["type"], "Unknown")
+
+    def test_infer_type_from_path(self):
+        infer = script_map.infer_type_from_path
+        self.assertEqual(infer("UserEvent/x.js"), "UserEventScript")
+        self.assertEqual(infer("User Event Scripts/x.js"), "UserEventScript")
+        self.assertEqual(infer("MapReduce/sub/x.js"), "MapReduceScript")
+        self.assertEqual(infer("ClientScript/x.js"), "ClientScript")
+        self.assertEqual(infer("Suitelet/UserEvent/x.js"), "UserEventScript")
+        self.assertIsNone(infer("Shared/x.js"))
+        self.assertIsNone(infer("x.js"))
+        self.assertIsNone(infer("Shared/UserEvent_x.js"))
+
+    def test_version_bucket(self):
+        bucket = script_map.version_bucket
+        self.assertEqual(bucket("1.0"), "1.0")
+        self.assertEqual(bucket("2.0"), "2.0")
+        self.assertEqual(bucket("2.X"), "2.x")
+        self.assertEqual(bucket(" 2.1 "), "2.1")
+        self.assertEqual(bucket(""), "None")
+        self.assertEqual(bucket("3.0"), "Other")
+
+    def test_collect_infers_type_and_version(self):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/v1.js", V1_SCRIPT)
+        self.write("a/v1.js", V1_SCRIPT)
+        self.write("a/UserEvent/ue.js", USER_EVENT)
+        scripts = self.scripts(self.collect_one(repo))
+        inferred = scripts["UserEvent/v1.js"]
+        self.assertEqual(inferred["type"], "UserEventScript")
+        self.assertTrue(inferred["type_inferred"])
+        self.assertEqual(inferred["version"], "1.0")
+        self.assertEqual(inferred["api_version"], "1.0")
+        root = scripts["v1.js"]
+        self.assertEqual(root["type"], "Unknown")
+        self.assertFalse(root["type_inferred"])
+        self.assertEqual(root["version"], "1.0")
+        declared = scripts["UserEvent/ue.js"]
+        self.assertEqual(declared["type"], "UserEventScript")
+        self.assertFalse(declared["type_inferred"])
+        self.assertEqual(declared["version"], "2.1")
 
     # AC6: entry points
 
@@ -544,11 +584,14 @@ var u = 'CUSTOMRECORD99';
                     "insertAdjacentHTML", "document.write", "eval("):
             self.assertNotIn(bad, text)
         self.assertEqual(text.count(script_map.DATA_TOKEN), 1)
-        for label in ("Constellation", "Record X-ray", "Risk grid", "All repos",
+        for label in ("Inventory", "Record X-ray", "Risk grid", "All clients",
+                      "All types", "All versions", "Clear filters", "Total scripts",
                       "Other scripts that touch this record", "No scripts found",
                       "Order within a step follows deployment order in NetSuite, "
                       "which isn't in the code.", "prefers-color-scheme"):
             self.assertIn(label, text)
+        self.assertNotIn("Constellation", text)
+        self.assertNotIn("All repos", text)
 
     def test_inline_script_passes_node_check(self):
         node = shutil.which("node")
