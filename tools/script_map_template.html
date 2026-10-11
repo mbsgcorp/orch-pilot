@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Script map</title>
+<style>
+:root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --text: #1d1f23;
+    --muted: #61666f;
+    --border: #d8dbe0;
+    --accent: #2b6cb0;
+    --edge: #8a909a;
+    --record: #3d4451;
+    --unresolved: #a0a4ab;
+    --high-bg: #fde2e1;
+    --high-border: #d93a33;
+    --medium-bg: #fdf1d6;
+    --medium-border: #c98a0c;
+    --low-bg: #e1f3e6;
+    --low-border: #2f8a4e;
+    --badge-bg: #e6ecf7;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #15171b;
+        --panel: #1e2126;
+        --text: #e6e8eb;
+        --muted: #9aa0a9;
+        --border: #363a42;
+        --accent: #6ea8ec;
+        --edge: #6b717b;
+        --record: #c6cbd3;
+        --unresolved: #5c6068;
+        --high-bg: #3d1f1e;
+        --high-border: #f0675f;
+        --medium-bg: #3a3018;
+        --medium-border: #e3ac3b;
+        --low-bg: #1c3324;
+        --low-border: #5cc27f;
+        --badge-bg: #2a3242;
+    }
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+}
+header h1 { font-size: 18px; margin: 0; }
+#generated { color: var(--muted); font-size: 12px; }
+#repo-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+    background: var(--bg);
+}
+.chip.unverified { border-color: var(--medium-border); }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button, .controls select, .controls input, .detail-link {
+    font: inherit;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+}
+nav button { cursor: pointer; }
+nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+main { padding: 12px 16px; }
+.view[hidden] { display: none; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.empty { color: var(--muted); font-style: italic; }
+#legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.line-swatch { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--edge); }
+.line-swatch.touches { border-top-style: dashed; }
+.line-swatch.library { border-top-style: dotted; }
+.graph-layout { display: flex; gap: 12px; align-items: stretch; }
+.graph-wrap {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    position: relative;
+}
+#graph-empty { position: absolute; top: 12px; left: 12px; }
+#graph { width: 100%; height: 70vh; display: block; touch-action: none; cursor: grab; }
+#graph .edge { stroke: var(--edge); stroke-width: 1.2; fill: none; }
+#graph .edge.touches { stroke-dasharray: 6 4; }
+#graph .edge.library, #graph .edge.client { stroke-dasharray: 2 3; }
+#graph .node circle { stroke: var(--panel); stroke-width: 1.5; cursor: pointer; }
+#graph .node.record circle { fill: var(--record); }
+#graph .node.unresolved circle { fill: var(--unresolved); }
+#graph .node text { fill: var(--text); font-size: 11px; pointer-events: none; }
+#graph .node.script text { font-size: 9px; fill: var(--muted); }
+#graph .node.match circle { stroke: var(--accent); stroke-width: 4; }
+#graph .node.selected circle { stroke: var(--text); stroke-width: 3; }
+#graph .dim { opacity: 0.12; }
+#graph .edge.hl { stroke: var(--accent); stroke-width: 2; }
+#detail {
+    width: 320px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 10px 12px;
+    max-height: 70vh;
+    overflow: auto;
+}
+#detail h2 { font-size: 15px; margin: 0 0 8px; word-break: break-word; }
+#detail dl { margin: 0; }
+#detail dt { font-weight: 600; margin-top: 6px; }
+#detail dd { margin: 2px 0 0; word-break: break-word; }
+#detail ul { margin: 2px 0 0; padding-left: 18px; }
+.detail-link { padding: 0 4px; cursor: pointer; text-align: left; }
+.kind { color: var(--muted); font-size: 12px; }
+.note { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+.lane, .other {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 8px 12px;
+    margin-bottom: 8px;
+}
+.lane h3, .other h3 { font-size: 14px; margin: 0 0 6px; }
+.lane ul, .other ul, #x-missing ul { margin: 0; padding-left: 18px; }
+.badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--badge-bg);
+    margin-left: 6px;
+}
+.path { color: var(--muted); font-size: 12px; margin-left: 6px; word-break: break-all; }
+#r-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.card {
+    border: 1px solid var(--border);
+    border-left-width: 5px;
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+.card:focus { outline: 2px solid var(--accent); }
+.card.high { background: var(--high-bg); border-left-color: var(--high-border); }
+.card.medium { background: var(--medium-bg); border-left-color: var(--medium-border); }
+.card.low { background: var(--low-bg); border-left-color: var(--low-border); }
+.card .name { font-weight: 600; word-break: break-word; }
+.card .meta { color: var(--muted); font-size: 12px; }
+.card ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+#skipped { margin: 16px; }
+#skipped table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+#skipped th, #skipped td { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; word-break: break-all; }
+@media (max-width: 600px) {
+    header { flex-direction: column; align-items: flex-start; }
+    nav { margin-left: 0; flex-wrap: wrap; }
+    main { padding: 8px; }
+    .controls { flex-direction: column; align-items: stretch; }
+    .graph-layout { flex-direction: column; }
+    #graph { height: 60vh; }
+    #detail { width: auto; max-height: none; }
+    #skipped { margin: 8px; }
+}
+</style>
+</head>
+<body>
+<header>
+    <h1 id="title">Script map</h1>
+    <span id="generated"></span>
+    <div id="repo-chips"></div>
+    <nav>
+        <button type="button" data-view="constellation">Constellation</button>
+        <button type="button" data-view="xray">Record X-ray</button>
+        <button type="button" data-view="risk">Risk grid</button>
+    </nav>
+</header>
+<main>
+    <section id="view-constellation" class="view">
+        <div class="controls">
+            <select id="c-repo" aria-label="Repo filter"></select>
+            <input id="c-search" type="search" placeholder="Search names" aria-label="Search names">
+        </div>
+        <div id="legend"></div>
+        <div class="graph-layout">
+            <div class="graph-wrap">
+                <p id="graph-empty" class="empty" hidden>No scripts found</p>
+                <svg id="graph" role="img" aria-label="Script graph"><g id="graph-root"><g id="graph-edges"></g><g id="graph-nodes"></g></g></svg>
+            </div>
+            <aside id="detail"><p class="empty">Click a node to see details.</p></aside>
+        </div>
+    </section>
+    <section id="view-xray" class="view" hidden>
+        <div class="controls">
+            <select id="x-repo" aria-label="Repo filter"></select>
+            <select id="x-record" aria-label="Record"></select>
+        </div>
+        <p class="note">Order within a step follows deployment order in NetSuite, which isn't in the code.</p>
+        <details id="x-missing"><summary id="x-missing-count"></summary><ul id="x-missing-list"></ul></details>
+        <div id="x-body"></div>
+    </section>
+    <section id="view-risk" class="view" hidden>
+        <div class="controls">
+            <select id="r-repo" aria-label="Repo filter"></select>
+        </div>
+        <div id="r-grid"></div>
+    </section>
+</main>
+<details id="skipped"><summary id="skipped-summary"></summary><div id="skipped-body"></div></details>
+<script type="application/json" id="script-map-data">__SCRIPT_MAP_DATA__</script>
+<script>
+(function () {
+    'use strict';
+
+    var data = JSON.parse(document.getElementById('script-map-data').textContent);
+    var MAX_TICKS = 600;
+    var LANES = ['beforeLoad', 'beforeSubmit', 'afterSubmit', 'pageInit', 'fieldChanged',
+        'postSourcing', 'sublistChanged', 'lineInit', 'validateField', 'validateLine',
+        'validateInsert', 'validateDelete', 'saveRecord'];
+    var PALETTE = ['#2b6cb0', '#d0602a', '#2f8a4e', '#8e44ad', '#c0392b', '#1a9c9c',
+        '#b7950b', '#d6488c', '#5d6d7e', '#6c5ce7', '#7f8c1d', '#a0522d'];
+    var ALL = '';
+
+    var graphEl = document.getElementById('graph');
+    var SVG_NS = graphEl.namespaceURI;
+    var rootG = document.getElementById('graph-root');
+    var edgesG = document.getElementById('graph-edges');
+    var nodesG = document.getElementById('graph-nodes');
+
+    var nodes = data.nodes || [];
+    var edges = data.edges || [];
+    var byId = {};
+    var links = {};
+    nodes.forEach(function (n) { byId[n.id] = n; links[n.id] = []; });
+    edges.forEach(function (e) {
+        if (!byId[e.source] || !byId[e.target]) { return; }
+        links[e.source].push({ other: e.target, kind: e.kind, edge: e });
+        links[e.target].push({ other: e.source, kind: e.kind, edge: e });
+    });
+    var scripts = nodes.filter(function (n) { return n.kind === 'script'; });
+    var records = nodes.filter(function (n) { return n.kind === 'record'; });
+
+    var types = [];
+    scripts.forEach(function (s) { if (types.indexOf(s.type) === -1) { types.push(s.type); } });
+    types.sort();
+    var typeColor = {};
+    types.forEach(function (t, i) { typeColor[t] = PALETTE[i % PALETTE.length]; });
+
+    function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) { node.className = className; }
+        if (text !== undefined && text !== null) { node.textContent = String(text); }
+        return node;
+    }
+
+    function clear(node) {
+        while (node.firstChild) { node.removeChild(node.firstChild); }
+    }
+
+    function svgEl(tag, attrs) {
+        var node = document.createElementNS(SVG_NS, tag);
+        Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+        return node;
+    }
+
+    function inRepo(node, repo) { return repo === ALL || node.repo === repo; }
+
+    function deployCount(script) {
+        return links[script.id].filter(function (l) { return l.kind === 'deploy'; }).length;
+    }
+
+    function fillRepoSelect(select) {
+        clear(select);
+        var all = el('option', null, 'All repos');
+        all.value = ALL;
+        select.appendChild(all);
+        (data.repos || []).forEach(function (r) {
+            var opt = el('option', null, r.label);
+            opt.value = r.label;
+            select.appendChild(opt);
+        });
+    }
+
+    // Header
+    var title = data.title || 'Script map';
+    document.title = title;
+    document.getElementById('title').textContent = title;
+    document.getElementById('generated').textContent =
+        'Generated ' + String(data.generated_at || '').replace('T', ' ').replace('Z', '') + ' UTC';
+    var chips = document.getElementById('repo-chips');
+    (data.repos || []).forEach(function (r) {
+        var chip = el('span', 'chip' + (r.branch === 'main' ? '' : ' unverified'),
+            r.label + ' · ' + r.script_count + ' scripts · ' + r.branch);
+        chips.appendChild(chip);
+    });
+
+    var views = { constellation: 'view-constellation', xray: 'view-xray', risk: 'view-risk' };
+    var navButtons = document.querySelectorAll('nav button');
+    function showView(name) {
+        Object.keys(views).forEach(function (k) {
+            document.getElementById(views[k]).hidden = k !== name;
+        });
+        Array.prototype.forEach.call(navButtons, function (b) {
+            b.classList.toggle('active', b.getAttribute('data-view') === name);
+        });
+        if (name === 'constellation') { ensureViewport(); }
+    }
+    Array.prototype.forEach.call(navButtons, function (b) {
+        b.addEventListener('click', function () { showView(b.getAttribute('data-view')); });
+    });
+
+    // Constellation
+    var cRepo = document.getElementById('c-repo');
+    var cSearch = document.getElementById('c-search');
+    var detail = document.getElementById('detail');
+    var graphEmpty = document.getElementById('graph-empty');
+    fillRepoSelect(cRepo);
+
+    var legend = document.getElementById('legend');
+    function legendItem(swatch, text) {
+        var item = el('span', 'legend-item');
+        item.appendChild(swatch);
+        item.appendChild(document.createTextNode(text));
+        legend.appendChild(item);
+    }
+    types.forEach(function (t) {
+        var s = el('span', 'swatch');
+        s.style.background = typeColor[t];
+        legendItem(s, t);
+    });
+    var recSwatch = el('span', 'swatch');
+    recSwatch.style.background = 'var(--record)';
+    legendItem(recSwatch, 'Record');
+    var unSwatch = el('span', 'swatch');
+    unSwatch.style.background = 'var(--unresolved)';
+    legendItem(unSwatch, 'Unresolved');
+    legendItem(el('span', 'line-swatch'), 'deploy');
+    legendItem(el('span', 'line-swatch touches'), 'touches');
+    legendItem(el('span', 'line-swatch library'), 'library / client');
+
+    var view = { x: 0, y: 0, k: 1, ready: false };
+    var sim = { nodes: [], edges: [], index: {}, tick: 0, alpha: 1, frame: 0 };
+    var selectedId = null;
+
+    function applyTransform() {
+        rootG.setAttribute('transform',
+            'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')');
+    }
+
+    function ensureViewport() {
+        if (view.ready) { return; }
+        var rect = graphEl.getBoundingClientRect();
+        if (!rect.width) { return; }
+        view.x = rect.width / 2;
+        view.y = rect.height / 2;
+        view.ready = true;
+        applyTransform();
+    }
+
+    function nodeRadius(n) {
+        if (n.kind === 'record') { return 12; }
+        if (n.kind === 'unresolved') { return 5; }
+        return 6;
+    }
+
+    function nodeLabel(n) {
+        if (n.kind === 'script') { return n.name; }
+        return n.label;
+    }
+
+    function buildGraph() {
+        if (sim.frame) { cancelAnimationFrame(sim.frame); sim.frame = 0; }
+        clear(edgesG);
+        clear(nodesG);
+        var repo = cRepo.value;
+        var visible = nodes.filter(function (n) { return inRepo(n, repo); });
+        graphEmpty.hidden = visible.some(function (n) { return n.kind === 'script'; });
+        sim.index = {};
+        sim.nodes = visible.map(function (n, i) {
+            var angle = i * 2.399963;
+            var radius = 12 * Math.sqrt(i + 1);
+            var s = { id: n.id, data: n, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius,
+                vx: 0, vy: 0, r: nodeRadius(n) };
+            sim.index[n.id] = s;
+            return s;
+        });
+        sim.edges = [];
+        edges.forEach(function (e) {
+            var a = sim.index[e.source];
+            var b = sim.index[e.target];
+            if (!a || !b) { return; }
+            var line = svgEl('line', { 'class': 'edge ' + e.kind });
+            edgesG.appendChild(line);
+            sim.edges.push({ a: a, b: b, kind: e.kind, edge: e, line: line });
+        });
+        sim.nodes.forEach(function (s) {
+            var n = s.data;
+            var g = svgEl('g', { 'class': 'node ' + n.kind });
+            var circle = svgEl('circle', { r: s.r });
+            if (n.kind === 'script') { circle.setAttribute('fill', typeColor[n.type]); }
+            var label = svgEl('text', { x: s.r + 3, y: 4 });
+            label.textContent = nodeLabel(n);
+            var tip = svgEl('title');
+            tip.textContent = n.kind === 'script' ? n.repo + ': ' + n.path : n.repo + ': ' + nodeLabel(n);
+            g.appendChild(circle);
+            g.appendChild(label);
+            g.appendChild(tip);
+            g.setAttribute('data-id', n.id);
+            nodesG.appendChild(g);
+            s.g = g;
+        });
+        sim.tick = 0;
+        sim.alpha = 1;
+        render();
+        applySearch();
+        applySelection();
+        sim.frame = requestAnimationFrame(step);
+    }
+
+    function step() {
+        sim.frame = 0;
+        var list = sim.nodes;
+        var count = list.length;
+        var alpha = sim.alpha;
+        var i, j, a, b, dx, dy, d2, d, f;
+        for (i = 0; i < count; i++) {
+            a = list[i];
+            for (j = i + 1; j < count; j++) {
+                b = list[j];
+                dx = b.x - a.x;
+                dy = b.y - a.y;
+                d2 = dx * dx + dy * dy;
+                if (d2 < 1) { dx = (i - j) * 0.1 + 0.1; dy = 0.1; d2 = 1; }
+                if (d2 > 250000) { continue; }
+                f = 900 * alpha / d2;
+                d = Math.sqrt(d2);
+                a.vx -= dx / d * f; a.vy -= dy / d * f;
+                b.vx += dx / d * f; b.vy += dy / d * f;
+            }
+        }
+        sim.edges.forEach(function (e) {
+            dx = e.b.x - e.a.x;
+            dy = e.b.y - e.a.y;
+            d = Math.sqrt(dx * dx + dy * dy) || 1;
+            var target = e.kind === 'deploy' ? 50 : 70;
+            f = (d - target) * 0.04 * alpha;
+            e.a.vx += dx / d * f; e.a.vy += dy / d * f;
+            e.b.vx -= dx / d * f; e.b.vy -= dy / d * f;
+        });
+        list.forEach(function (s) {
+            s.vx -= s.x * 0.01 * alpha;
+            s.vy -= s.y * 0.01 * alpha;
+            s.vx *= 0.6;
+            s.vy *= 0.6;
+            s.x += s.vx;
+            s.y += s.vy;
+        });
+        sim.alpha *= 0.992;
+        sim.tick += 1;
+        render();
+        if (sim.tick < MAX_TICKS && sim.alpha > 0.01) {
+            sim.frame = requestAnimationFrame(step);
+        }
+    }
+
+    function render() {
+        sim.edges.forEach(function (e) {
+            e.line.setAttribute('x1', e.a.x.toFixed(1));
+            e.line.setAttribute('y1', e.a.y.toFixed(1));
+            e.line.setAttribute('x2', e.b.x.toFixed(1));
+            e.line.setAttribute('y2', e.b.y.toFixed(1));
+        });
+        sim.nodes.forEach(function (s) {
+            s.g.setAttribute('transform', 'translate(' + s.x.toFixed(1) + ',' + s.y.toFixed(1) + ')');
+        });
+    }
+
+    function applySearch() {
+        var q = cSearch.value.trim().toLowerCase();
+        sim.nodes.forEach(function (s) {
+            var n = s.data;
+            var hay = (nodeLabel(n) + ' ' + (n.path || '') + ' ' + (n.record_id || '')).toLowerCase();
+            s.g.classList.toggle('match', q !== '' && hay.indexOf(q) !== -1);
+        });
+    }
+
+    function applySelection() {
+        var keep = {};
+        if (selectedId && sim.index[selectedId]) {
+            keep[selectedId] = true;
+            links[selectedId].forEach(function (l) { keep[l.other] = true; });
+        }
+        var active = selectedId && sim.index[selectedId];
+        sim.nodes.forEach(function (s) {
+            s.g.classList.toggle('selected', s.id === selectedId);
+            s.g.classList.toggle('dim', !!active && !keep[s.id]);
+        });
+        sim.edges.forEach(function (e) {
+            var touching = active && (e.a.id === selectedId || e.b.id === selectedId);
+            e.line.classList.toggle('hl', !!touching);
+            e.line.classList.toggle('dim', !!active && !touching);
+        });
+    }
+
+    function addField(dl, label, value) {
+        dl.appendChild(el('dt', null, label));
+        var dd = el('dd');
+        if (value instanceof Node) { dd.appendChild(value); } else { dd.textContent = value; }
+        dl.appendChild(dd);
+    }
+
+    function linkList(items) {
+        if (!items.length) { return el('span', 'empty', 'none'); }
+        var ul = el('ul');
+        items.forEach(function (l) {
+            var other = byId[l.other];
+            var li = el('li');
+            var btn = el('button', 'detail-link', nodeLabel(other));
+            btn.type = 'button';
+            btn.addEventListener('click', function () { selectNode(other.id); });
+            li.appendChild(btn);
+            li.appendChild(el('span', 'kind', ' ' + l.kind));
+            ul.appendChild(li);
+        });
+        return ul;
+    }
+
+    function showDetail(n) {
+        clear(detail);
+        if (!n) {
+            detail.appendChild(el('p', 'empty', 'Click a node to see details.'));
+            return;
+        }
+        detail.appendChild(el('h2', null, nodeLabel(n)));
+        var dl = el('dl');
+        addField(dl, 'Repo', n.repo);
+        var mine = links[n.id];
+        if (n.kind === 'script') {
+            addField(dl, 'Path', n.path);
+            addField(dl, 'Type', n.type);
+            addField(dl, 'API version', n.api_version || 'none');
+            addField(dl, 'Entry points', n.entry_points.length ? n.entry_points.join(', ') : 'none');
+            addField(dl, 'N/ modules', n.modules.length ? n.modules.join(', ') : 'none');
+            addField(dl, 'Records', linkList(mine.filter(function (l) {
+                return byId[l.other].kind === 'record';
+            })));
+            addField(dl, 'Dependencies', linkList(mine.filter(function (l) {
+                return byId[l.other].kind !== 'record';
+            })));
+            addField(dl, 'Risk', n.risk.level + ' (score ' + n.risk.score + ')');
+            addField(dl, 'Risk reasons', n.risk.reasons.length ? n.risk.reasons.join(', ') : 'none');
+        } else if (n.kind === 'record') {
+            addField(dl, 'Id', n.record_id);
+            addField(dl, 'Label', n.label);
+            addField(dl, 'Scripts', linkList(mine));
+        } else {
+            addField(dl, 'Path', n.label);
+            addField(dl, 'Status', 'unresolved dependency');
+            addField(dl, 'Referenced by', linkList(mine));
+        }
+        detail.appendChild(dl);
+    }
+
+    function selectNode(id) {
+        selectedId = id;
+        applySelection();
+        showDetail(id ? byId[id] : null);
+    }
+
+    cRepo.addEventListener('change', function () {
+        if (selectedId && !inRepo(byId[selectedId], cRepo.value)) { selectNode(null); }
+        buildGraph();
+    });
+    cSearch.addEventListener('input', applySearch);
+
+    // Pan, zoom and click handling
+    var pointers = {};
+    var gesture = null;
+
+    function localPoint(clientX, clientY) {
+        var rect = graphEl.getBoundingClientRect();
+        return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function zoomAt(px, py, factor) {
+        var k = Math.min(8, Math.max(0.1, view.k * factor));
+        var f = k / view.k;
+        view.x = px - (px - view.x) * f;
+        view.y = py - (py - view.y) * f;
+        view.k = k;
+        applyTransform();
+    }
+
+    function pointerList() {
+        return Object.keys(pointers).map(function (k) { return pointers[k]; });
+    }
+
+    graphEl.addEventListener('wheel', function (ev) {
+        ev.preventDefault();
+        var p = localPoint(ev.clientX, ev.clientY);
+        zoomAt(p.x, p.y, Math.exp(-ev.deltaY * 0.0015));
+    }, { passive: false });
+
+    graphEl.addEventListener('pointerdown', function (ev) {
+        var nodeG = ev.target.closest ? ev.target.closest('.node') : null;
+        pointers[ev.pointerId] = { x: ev.clientX, y: ev.clientY };
+        graphEl.setPointerCapture(ev.pointerId);
+        var list = pointerList();
+        if (list.length === 1) {
+            gesture = { mode: 'pan', startX: ev.clientX, startY: ev.clientY, moved: false,
+                nodeId: nodeG ? nodeG.getAttribute('data-id') : null };
+        } else if (list.length === 2) {
+            var dx = list[0].x - list[1].x;
+            var dy = list[0].y - list[1].y;
+            gesture = { mode: 'pinch', dist: Math.sqrt(dx * dx + dy * dy) || 1, moved: true };
+        }
+    });
+
+    graphEl.addEventListener('pointermove', function (ev) {
+        var prev = pointers[ev.pointerId];
+        if (!prev || !gesture) { return; }
+        var cur = { x: ev.clientX, y: ev.clientY };
+        pointers[ev.pointerId] = cur;
+        if (gesture.mode === 'pan') {
+            if (Math.abs(cur.x - gesture.startX) + Math.abs(cur.y - gesture.startY) > 4) {
+                gesture.moved = true;
+            }
+            view.x += cur.x - prev.x;
+            view.y += cur.y - prev.y;
+            applyTransform();
+        } else if (gesture.mode === 'pinch') {
+            var list = pointerList();
+            if (list.length < 2) { return; }
+            var dx = list[0].x - list[1].x;
+            var dy = list[0].y - list[1].y;
+            var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            var mid = localPoint((list[0].x + list[1].x) / 2, (list[0].y + list[1].y) / 2);
+            zoomAt(mid.x, mid.y, dist / gesture.dist);
+            gesture.dist = dist;
+        }
+    });
+
+    function endPointer(ev) {
+        if (!pointers[ev.pointerId]) { return; }
+        delete pointers[ev.pointerId];
+        if (gesture && gesture.mode === 'pan' && !gesture.moved && ev.type === 'pointerup') {
+            selectNode(gesture.nodeId);
+        }
+        gesture = null;
+        var rest = pointerList();
+        if (rest.length === 1) {
+            gesture = { mode: 'pan', startX: rest[0].x, startY: rest[0].y, moved: true, nodeId: null };
+        }
+    }
+    graphEl.addEventListener('pointerup', endPointer);
+    graphEl.addEventListener('pointercancel', endPointer);
+
+    // Record X-ray
+    var xRepo = document.getElementById('x-repo');
+    var xRecord = document.getElementById('x-record');
+    var xBody = document.getElementById('x-body');
+    var xMissingCount = document.getElementById('x-missing-count');
+    var xMissingList = document.getElementById('x-missing-list');
+    fillRepoSelect(xRepo);
+
+    function recordScripts(rec, kind) {
+        return links[rec.id].filter(function (l) {
+            return l.kind === kind && byId[l.other].kind === 'script';
+        }).map(function (l) { return byId[l.other]; });
+    }
+
+    function connectedScriptCount(rec) {
+        var seen = {};
+        links[rec.id].forEach(function (l) {
+            if (byId[l.other].kind === 'script') { seen[l.other] = true; }
+        });
+        return Object.keys(seen).length;
+    }
+
+    function scriptItem(s, showType) {
+        var li = el('li');
+        li.appendChild(document.createTextNode(s.name));
+        if (showType) { li.appendChild(el('span', 'kind', ' ' + s.type)); }
+        if (deployCount(s) >= 2) { li.appendChild(el('span', 'badge', 'shared')); }
+        li.appendChild(el('span', 'path', s.repo + ': ' + s.path));
+        return li;
+    }
+
+    function fillRecordPicker() {
+        var repo = xRepo.value;
+        var previous = xRecord.value;
+        clear(xRecord);
+        var list = records.filter(function (r) { return inRepo(r, repo); }).map(function (r) {
+            return { rec: r, count: connectedScriptCount(r) };
+        });
+        list.sort(function (a, b) {
+            return b.count - a.count || a.rec.label.localeCompare(b.rec.label) ||
+                a.rec.id.localeCompare(b.rec.id);
+        });
+        list.forEach(function (item) {
+            var r = item.rec;
+            var text = r.label + (r.label !== r.record_id ? ' [' + r.record_id + ']' : '') +
+                ' · ' + r.repo + ' · ' + item.count + ' scripts';
+            var opt = el('option', null, text);
+            opt.value = r.id;
+            xRecord.appendChild(opt);
+        });
+        if (list.some(function (item) { return item.rec.id === previous; })) {
+            xRecord.value = previous;
+        }
+    }
+
+    function renderMissing() {
+        var repo = xRepo.value;
+        var missing = scripts.filter(function (s) {
+            return inRepo(s, repo) && !s.has_deploy_line &&
+                (s.type === 'UserEventScript' || s.type === 'ClientScript');
+        });
+        xMissingCount.textContent = missing.length +
+            ' UserEventScript and ClientScript files have no DEPLOY ON: line';
+        clear(xMissingList);
+        missing.forEach(function (s) {
+            xMissingList.appendChild(el('li', null, s.repo + ': ' + s.path));
+        });
+    }
+
+    function renderXray() {
+        clear(xBody);
+        renderMissing();
+        var repo = xRepo.value;
+        if (!scripts.some(function (s) { return inRepo(s, repo); })) {
+            xBody.appendChild(el('p', 'empty', 'No scripts found'));
+            return;
+        }
+        var rec = byId[xRecord.value];
+        if (!rec) {
+            xBody.appendChild(el('p', 'empty', 'No records found'));
+            return;
+        }
+        var deployed = recordScripts(rec, 'deploy');
+        var lanesShown = 0;
+        LANES.forEach(function (lane) {
+            var inLane = deployed.filter(function (s) { return s.entry_points.indexOf(lane) !== -1; });
+            if (!inLane.length) { return; }
+            lanesShown += 1;
+            var box = el('div', 'lane');
+            box.appendChild(el('h3', null, lane));
+            var ul = el('ul');
+            inLane.forEach(function (s) { ul.appendChild(scriptItem(s, false)); });
+            box.appendChild(ul);
+            xBody.appendChild(box);
+        });
+        if (!lanesShown) {
+            xBody.appendChild(el('p', 'empty', 'No deployed scripts export a record entry point.'));
+        }
+        var other = el('div', 'other');
+        other.appendChild(el('h3', null, 'Other scripts that touch this record'));
+        var touching = recordScripts(rec, 'touches');
+        if (touching.length) {
+            var ul = el('ul');
+            touching.forEach(function (s) { ul.appendChild(scriptItem(s, true)); });
+            other.appendChild(ul);
+        } else {
+            other.appendChild(el('p', 'empty', 'none'));
+        }
+        xBody.appendChild(other);
+    }
+
+    xRepo.addEventListener('change', function () { fillRecordPicker(); renderXray(); });
+    xRecord.addEventListener('change', renderXray);
+
+    // Risk grid
+    var rRepo = document.getElementById('r-repo');
+    var rGrid = document.getElementById('r-grid');
+    fillRepoSelect(rRepo);
+
+    function openInConstellation(s) {
+        if (!inRepo(s, cRepo.value)) {
+            cRepo.value = ALL;
+            selectedId = null;
+            buildGraph();
+        }
+        showView('constellation');
+        selectNode(s.id);
+    }
+
+    function renderRisk() {
+        clear(rGrid);
+        var repo = rRepo.value;
+        var list = scripts.filter(function (s) { return inRepo(s, repo); });
+        if (!list.length) {
+            rGrid.appendChild(el('p', 'empty', 'No scripts found'));
+            return;
+        }
+        list.sort(function (a, b) {
+            return b.risk.score - a.risk.score || a.path.localeCompare(b.path) ||
+                a.repo.localeCompare(b.repo);
+        });
+        list.forEach(function (s) {
+            var card = el('div', 'card ' + s.risk.level);
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.appendChild(el('div', 'name', s.name));
+            card.appendChild(el('div', 'meta', s.repo + ' · ' + s.type + ' · ' +
+                s.risk.level + ' (' + s.risk.score + ')'));
+            var ul = el('ul');
+            if (s.risk.reasons.length) {
+                s.risk.reasons.forEach(function (r) { ul.appendChild(el('li', null, r)); });
+            } else {
+                ul.appendChild(el('li', null, 'no risk factors'));
+            }
+            card.appendChild(ul);
+            card.addEventListener('click', function () { openInConstellation(s); });
+            card.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openInConstellation(s); }
+            });
+            rGrid.appendChild(card);
+        });
+    }
+    rRepo.addEventListener('change', renderRisk);
+
+    // Skipped files
+    var skipped = data.skipped || [];
+    document.getElementById('skipped-summary').textContent = 'Skipped files (' + skipped.length + ')';
+    var skippedBody = document.getElementById('skipped-body');
+    if (!skipped.length) {
+        skippedBody.appendChild(el('p', 'empty', 'No skipped files'));
+    } else {
+        var table = el('table');
+        var head = el('tr');
+        ['Repo', 'Path', 'Reason'].forEach(function (h) { head.appendChild(el('th', null, h)); });
+        table.appendChild(head);
+        skipped.forEach(function (row) {
+            var tr = el('tr');
+            tr.appendChild(el('td', null, row.repo));
+            tr.appendChild(el('td', null, row.path));
+            tr.appendChild(el('td', null, row.reason));
+            table.appendChild(tr);
+        });
+        skippedBody.appendChild(table);
+    }
+
+    showView('constellation');
+    buildGraph();
+    fillRecordPicker();
+    renderXray();
+    renderRisk();
+}());
+</script>
+</body>
+</html>
