@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
@@ -167,6 +169,30 @@ class ScriptMapTest(unittest.TestCase):
         self.assertIn("HEAD", err)
         self.assertFalse(self.out.exists())
 
+    def test_collect_raises_on_unreadable_head(self):
+        repo = self.make_repo("a", head=None)
+        (repo / ".git").mkdir()
+        with self.assertRaises(OSError):
+            self.collect_one(repo)
+
+    def test_head_unreadable_after_guard_is_error(self):
+        repo = self.make_repo("a")
+        real = script_map.branch_status
+        calls = []
+
+        def flaky(path):
+            calls.append(path)
+            if len(calls) > 1:
+                (Path(path) / ".git" / "HEAD").unlink()
+            return real(path)
+
+        with mock.patch.object(script_map, "branch_status", flaky):
+            code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith(f"error: A cannot read {repo / '.git' / 'HEAD'}: "), err)
+        self.assertFalse(self.out.exists())
+
     # AC3: input errors
 
     def assertInputError(self, argv):
@@ -231,6 +257,28 @@ class ScriptMapTest(unittest.TestCase):
         data = self.collect_one(repo)
         self.assertEqual(data["skipped"], [{"repo": "A", "path": "big.js", "reason": "too large"}])
 
+    def test_unreadable_directory_is_skipped(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root can list unreadable directories")
+        repo = self.make_repo("a")
+        self.write("a/Locked/x.js", USER_EVENT)
+        locked = repo / "Locked"
+        locked.chmod(0)
+        try:
+            try:
+                os.listdir(locked)
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("chmod 0 does not prevent listing here")
+            data = self.collect_one(repo)
+        finally:
+            locked.chmod(0o755)
+        entries = [s for s in data["skipped"] if s["path"] == "Locked"]
+        self.assertEqual(len(entries), 1, data["skipped"])
+        self.assertEqual(entries[0]["repo"], "A")
+        self.assertTrue(entries[0]["reason"].startswith("unreadable: "), entries[0])
+
     def test_crlf_parsed(self):
         repo = self.make_repo("a")
         self.write("a/ClientScript/c.js", USER_EVENT.replace("\n", "\r\n"))
@@ -284,6 +332,10 @@ class ScriptMapTest(unittest.TestCase):
     };
 });"""
         self.assertEqual(script_map.entry_points(text), ["pageInit", "fieldChanged", "saveRecord"])
+
+    def test_entry_points_ignores_nested_keys(self):
+        text = "return { helper: { beforeLoad: fn }, list: [a, get], pageInit };"
+        self.assertEqual(script_map.entry_points(text), ["pageInit"])
 
     def test_entry_points_unbalanced_or_missing(self):
         self.assertEqual(script_map.entry_points("return { beforeLoad, { "), [])

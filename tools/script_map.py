@@ -151,7 +151,20 @@ def entry_points(text):
                 break
     if end is None:
         return []
-    body = text[start:end + 1]
+    top = []
+    depth = 0
+    for char in text[start:end + 1]:
+        if char in "{[(":
+            depth += 1
+            if depth == 1:
+                top.append(char)
+        elif char in "}])":
+            if depth == 1:
+                top.append(char)
+            depth -= 1
+        elif depth == 1:
+            top.append(char)
+    body = "".join(top)
     allowed = set(ENTRY_POINTS)
     found = []
     for match in KEY_RE.finditer(body):
@@ -268,9 +281,13 @@ def basename_key(path):
     return name.lower()
 
 
-def js_files(root):
-    """Yield (relative_posix_path, absolute_path) for candidate *.js files."""
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+def js_files(root, errors=None):
+    """Yield (relative_posix_path, absolute_path) for candidate *.js files.
+
+    OSErrors from listing directories are appended to errors when it is a list.
+    """
+    onerror = errors.append if errors is not None else None
+    for dirpath, dirnames, filenames in os.walk(root, onerror=onerror, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if d.lower() not in EXCLUDED_DIRS)
         for name in sorted(filenames):
             lower = name.lower()
@@ -298,7 +315,8 @@ def collect(repos):
     for label, root in repos:
         root = Path(root)
         scripts = []
-        for rel, full in js_files(root):
+        walk_errors = []
+        for rel, full in js_files(root, walk_errors):
             try:
                 if os.path.getsize(full) > MAX_BYTES:
                     skipped.append({"repo": label, "path": rel, "reason": "too large"})
@@ -314,6 +332,10 @@ def collect(repos):
                 skipped.append({"repo": label, "path": rel, "reason": "not SuiteScript"})
                 continue
             scripts.append((rel, text, script_type, api_version))
+        for exc in walk_errors:
+            rel = Path(exc.filename).relative_to(root).as_posix()
+            skipped.append({"repo": label, "path": rel,
+                            "reason": f"unreadable: {exc.strerror}"})
         scripts.sort(key=lambda item: item[0])
 
         by_basename = {}
@@ -375,10 +397,7 @@ def collect(repos):
                 "record_id": record_id,
                 "label": records[record_id] or record_id,
             })
-        try:
-            status = branch_status(root)
-        except OSError:
-            status = None
+        status = branch_status(root)
         repo_rows.append({
             "label": label,
             "branch": "main" if status == "main" else "branch not verified",
@@ -446,7 +465,17 @@ def main(argv=None):
     for warning in warnings:
         print(warning, file=sys.stderr)
 
-    data = collect(repos)
+    try:
+        data = collect(repos)
+    except OSError as exc:
+        for label, path in repos:
+            head = path / ".git" / "HEAD"
+            if exc.filename == str(head):
+                print(f"error: {label} cannot read {head}: {exc.strerror}", file=sys.stderr)
+                break
+        else:
+            print(f"error: cannot read {exc.filename}: {exc.strerror}", file=sys.stderr)
+        return 2
     data["title"] = args.title
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
