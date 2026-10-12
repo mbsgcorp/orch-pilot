@@ -7,7 +7,7 @@ Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    [--branch NAME] [--environment NAME]
                                    [--switch-url PATH --switch-label TEXT]
                                    [--missing-repo LABEL ...]
-                                   [--summary-namespace NAME]
+                                   [--summary-namespace NAME] [--team NAME ...]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
@@ -43,6 +43,13 @@ Each script node also carries "summary_key", the summary cache key the
 script_map_summarize.py run for this page would write: "NAME|LABEL:path" with
 --summary-namespace NAME, else "LABEL:path". The page's Regenerate summary
 button sends it to --refresh-url.
+
+Each script node also carries "summary_trigger", "summary_author",
+"summary_guidance" and "summary_history" (at most 5 {summary, generated_at,
+trigger, author, guidance} objects, newest first) from the same cache entry as
+"summary_generated_at"; they are "" and [] for header or empty summaries.
+Each --team NAME (repeatable, 1-40 characters after trimming) is listed in the
+page's "team" field, de-duplicated and sorted case-insensitively.
 """
 
 import argparse
@@ -51,6 +58,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -154,6 +162,9 @@ NAMESPACE_RE = re.compile(r"[A-Za-z0-9_-]*")
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}([0-9a-fA-F]{24})?")
 BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]+")
 MAX_HEADER = 300
+MAX_HISTORY = 5
+HISTORY_FIELDS = ("summary", "generated_at", "trigger", "author", "guidance")
+MAX_TEAM_NAME = 40
 
 
 def load_summary_cache(path):
@@ -171,6 +182,23 @@ def load_summary_cache(path):
             or not isinstance(cache.get("entries"), dict)):
         raise ValueError(f"{path} is not a valid summary cache")
     return cache
+
+
+def history_item(value):
+    """Return {summary, generated_at, trigger, author, guidance} from a cache entry or
+    history item; non-string or missing fields become ""."""
+    return {field: value.get(field) if isinstance(value.get(field), str) else ""
+            for field in HISTORY_FIELDS}
+
+
+def normalize_history(value):
+    """Return a cache entry's "history" as at most MAX_HISTORY normalized items.
+
+    A value that is not a list gives []; items that are not objects are dropped.
+    """
+    if not isinstance(value, list):
+        return []
+    return [history_item(item) for item in value if isinstance(item, dict)][:MAX_HISTORY]
 
 
 def header_description(text):
@@ -536,10 +564,17 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                     and isinstance(cached.get("summary"), str)):
                 cached = by_sha.get(sha)
             summary_generated_at = ""
+            summary_trigger = summary_author = summary_guidance = ""
+            summary_history = []
             if cached is not None:
                 summary, summary_source = cached["summary"], "ai"
                 if isinstance(cached.get("generated_at"), str):
                     summary_generated_at = cached["generated_at"]
+                details = history_item(cached)
+                summary_trigger = details["trigger"]
+                summary_author = details["author"]
+                summary_guidance = details["guidance"]
+                summary_history = normalize_history(cached.get("history"))
             else:
                 summary = header_description(text)
                 summary_source = "header" if summary else ""
@@ -594,6 +629,10 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 "summary": summary,
                 "summary_source": summary_source,
                 "summary_generated_at": summary_generated_at,
+                "summary_trigger": summary_trigger,
+                "summary_author": summary_author,
+                "summary_guidance": summary_guidance,
+                "summary_history": summary_history,
                 "summary_key": f"{key_prefix}{node_id}",
             })
 
@@ -653,6 +692,9 @@ def main(argv=None):
     parser.add_argument("--summary-namespace", default="", metavar="NAME",
                         help="script_map_summarize.py --namespace of this page's summaries; "
                              "prefixes each script's summary_key with NAME| (default none)")
+    parser.add_argument("--team", action="append", default=None, metavar="NAME",
+                        help="MBSG team member name listed in the page's team field "
+                             f"(1-{MAX_TEAM_NAME} characters); repeatable")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -681,6 +723,14 @@ def main(argv=None):
     if not NAMESPACE_RE.fullmatch(args.summary_namespace):
         print("error: --summary-namespace must be letters, digits, _ or -", file=sys.stderr)
         return 2
+    team = []
+    for value in args.team or []:
+        name = value.strip()
+        if (not 1 <= len(name) <= MAX_TEAM_NAME
+                or any(unicodedata.category(c) == "Cc" for c in name)):
+            print(f"error: --team must be 1-{MAX_TEAM_NAME} characters", file=sys.stderr)
+            return 2
+        team.append(name)
 
     repos = []
     labels = set()
@@ -747,6 +797,7 @@ def main(argv=None):
     data["switch_label"] = args.switch_label or ""
     data["missing_repos"] = args.missing_repo or []
     data["branch"] = args.branch
+    data["team"] = sorted(set(team), key=lambda name: (name.casefold(), name))
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         page = render(data)

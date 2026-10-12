@@ -1027,7 +1027,185 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(sorted(nodes["none.js"]), sorted([
             "id", "kind", "repo", "path", "name", "type", "type_inferred", "api_version",
             "version", "entry_points", "modules", "has_deploy_line", "risk", "summary",
-            "summary_source", "summary_generated_at", "summary_key"]))
+            "summary_source", "summary_generated_at", "summary_key", "summary_trigger",
+            "summary_author", "summary_guidance", "summary_history"]))
+
+    # Summary trigger, author, guidance and history; --team
+
+    def summary_details(self, node):
+        return (node["summary_trigger"], node["summary_author"], node["summary_guidance"],
+                node["summary_history"])
+
+    def history_item(self, summary, trigger="", author="", guidance=""):
+        return {"summary": summary, "generated_at": "2026-01-01T00:00:00Z",
+                "trigger": trigger, "author": author, "guidance": guidance}
+
+    def test_summary_details_from_own_key(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        history = [self.history_item("Older.", "first")]
+        entries = {"0:other.js": dict(self.summary_entry(sha, "Other."), trigger="reused"),
+                   "A:ai.js": dict(self.summary_entry(sha, "Own."), trigger="regenerate",
+                                   author="Kim", guidance="Mention holds.",
+                                   history=history)}
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual(node["summary"], "Own.")
+        self.assertEqual(self.summary_details(node),
+                         ("regenerate", "Kim", "Mention holds.", history))
+
+    def test_summary_details_from_sha_fallback_entry(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        history = [self.history_item("Before.", "code_changed")]
+        entries = {
+            "sandbox|A:ai.js": dict(self.summary_entry(sha, "Later key."), trigger="first"),
+            "C:x.js": dict(self.summary_entry(sha, "First key."), trigger="regenerate",
+                           author="Lee", guidance="G.", history=history),
+            "A:ai.js": dict(self.summary_entry("0" * 64, "Stale own key."),
+                            trigger="first", author="Own", guidance="Own G."),
+        }
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual(node["summary"], "First key.")
+        self.assertEqual(self.summary_details(node), ("regenerate", "Lee", "G.", history))
+
+    def test_summary_details_empty_for_header_empty_and_legacy(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT.replace("DEPLOY ON", "// x\n * DEPLOY ON"))
+        self.write("a/stale.js", USER_EVENT.replace("/**\n", "/**\n * Header text.\n"))
+        self.write("a/none.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        full = {"trigger": "regenerate", "author": "Kim", "guidance": "G.",
+                "history": [self.history_item("Old.")]}
+        entries = {"A:ai.js": self.summary_entry(sha, "Legacy."),
+                   "A:stale.js": dict(self.summary_entry("0" * 64, "Old."), **full),
+                   "A:none.js": dict(self.summary_entry("0" * 64, "Old."), **full)}
+        nodes = self.scripts(script_map.collect([("A", repo)], entries))
+        self.assertEqual(nodes["ai.js"]["summary_source"], "ai")
+        self.assertEqual(nodes["stale.js"]["summary_source"], "header")
+        self.assertEqual(nodes["none.js"]["summary_source"], "")
+        for name in ("ai.js", "stale.js", "none.js"):
+            with self.subTest(name=name):
+                self.assertEqual(self.summary_details(nodes[name]), ("", "", "", []))
+        no_cache = self.scripts(self.collect_one(repo))["none.js"]
+        self.assertEqual(self.summary_details(no_cache), ("", "", "", []))
+
+    def test_summary_details_non_string_and_malformed_history(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        history = ["not a dict", None, 5, ["list"],
+                   {"summary": "One.", "generated_at": 7, "trigger": None, "extra": "x"},
+                   {}]
+        history += [self.history_item(f"H{i}.") for i in range(6)]
+        entry = dict(self.summary_entry(sha, "S."), trigger=5, author=None,
+                     guidance=["g"], history=history)
+        node = self.scripts(script_map.collect([("A", repo)], {"A:ai.js": entry}))["ai.js"]
+        empty = {"summary": "", "generated_at": "", "trigger": "", "author": "",
+                 "guidance": ""}
+        self.assertEqual(self.summary_details(node), ("", "", "", [
+            dict(empty, summary="One."), empty, self.history_item("H0."),
+            self.history_item("H1."), self.history_item("H2.")]))
+        for value in ("not a list", {"a": 1}, None, 5):
+            with self.subTest(history=value):
+                entry = dict(self.summary_entry(sha, "S."), history=value)
+                node = self.scripts(
+                    script_map.collect([("A", repo)], {"A:ai.js": entry}))["ai.js"]
+                self.assertEqual(node["summary_history"], [])
+
+    def test_summary_details_via_cli(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        history = [self.history_item("Old.", "first")]
+        cache = self.write_cache({"A:ai.js": dict(
+            self.summary_entry(sha, "New."), trigger="regenerate", author="Kim",
+            guidance="G.", history=history)})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--summaries", str(cache)])
+        self.assertEqual(code, 0, err)
+        node = self.scripts(self.read_data()[1])["ai.js"]
+        self.assertEqual(self.summary_details(node), ("regenerate", "Kim", "G.", history))
+
+    def test_guidance_with_script_tag_stays_escaped(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        guidance = "Say </script><script>alert(1)</script> <!-- x"
+        cache = self.write_cache({"A:ai.js": dict(
+            self.summary_entry(sha, "New."), trigger="regenerate", author="</script>",
+            guidance=guidance,
+            history=[self.history_item("Old.", "regenerate", "Kim", guidance)])})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--summaries", str(cache), "--team", "A </script>"])
+        self.assertEqual(code, 0, err)
+        raw, data = self.read_data()
+        self.assertNotIn("</", raw)
+        self.assertNotIn("<!--", raw)
+        node = self.scripts(data)["ai.js"]
+        self.assertEqual(node["summary_guidance"], guidance)
+        self.assertEqual(node["summary_author"], "</script>")
+        self.assertEqual(node["summary_history"][0]["guidance"], guidance)
+        self.assertEqual(data["team"], ["A </script>"])
+        page = self.out.read_text(encoding="utf-8")
+        self.assertEqual(page.count("</script>"), 2)
+
+    def test_team_sorted_deduplicated_and_trimmed(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, out, err = self.run_main([
+            "--repo", f"A={repo}", "--out", str(self.out),
+            "--team", " kim ", "--team", "Alex", "--team", "bo", "--team", "Kim",
+            "--team", "kim", "--team", "x" * 40, "--team", "Zoë Smith"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("script_map: "))
+        _, data = self.read_data()
+        self.assertEqual(data["team"], ["Alex", "bo", "Kim", "kim", "x" * 40, "Zoë Smith"])
+
+    def test_team_absent_is_empty_list(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        _, data = self.read_data()
+        self.assertEqual(data["team"], [])
+
+    def test_team_invalid_exits_2(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        for value in ("", "   ", "x" * 41, "Kim\x07", "Kim\nLee", "\tKim\x00"):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--team", "Kim", "--team", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(err, "error: --team must be 1-40 characters\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_team_checked_before_repo_scan(self):
+        code, out, err = self.run_main(["--repo", f"A={self.root / 'missing'}",
+                                        "--out", str(self.out), "--team", ""])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "error: --team must be 1-40 characters\n")
+        self.assertFalse(self.out.exists())
+
+    def test_page_top_level_keys(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        _, data = self.read_data()
+        self.assertEqual(sorted(data), sorted([
+            "repos", "nodes", "edges", "skipped", "record_categories", "title", "refresh_url",
+            "environment", "switch_url", "switch_label", "missing_repos", "branch", "team",
+            "generated_at"]))
+
+    def test_help_mentions_team(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--team", result.stdout)
 
     def test_summaries_sha_fallback_via_cli(self):
         repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
