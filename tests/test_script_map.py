@@ -54,6 +54,67 @@ V1_SCRIPT = """function afterSubmit(type) {
 }
 """
 
+CLIENT_SCRIPT = """/**
+ * @NApiVersion 2.1
+ * @NScriptType ClientScript
+ */
+define(['N/record'], (record) => {
+    const pageInit = (ctx) => {
+        record.create({ type: 'customer' });
+    };
+    return { pageInit };
+});
+"""
+
+# Three scripts across two repos for the search tests. Req.Dep.js and hold.js both
+# deploy on customrecord2326; req_other.js has no DEPLOY ON: line.
+SEARCH_REPOS = {
+    "RTMH": {"Req.Dep.js": USER_EVENT, "req_other.js": CLIENT_SCRIPT},
+    "WCS": {"hold.js": USER_EVENT.replace("SALES_ORDER", "INVOICE")},
+}
+
+DARK_THEME = {
+    "--bg": "#15171b", "--panel": "#1e2126", "--text": "#e6e8eb", "--muted": "#9aa0a9",
+    "--border": "#363a42", "--accent": "#6ea8ec", "--edge": "#6b717b", "--record": "#c6cbd3",
+    "--unresolved": "#5c6068", "--high-bg": "#3d1f1e", "--high-border": "#f0675f",
+    "--medium-bg": "#3a3018", "--medium-border": "#e3ac3b", "--low-bg": "#1c3324",
+    "--low-border": "#5cc27f", "--badge-bg": "#2a3242", "--accent-contrast": "#0f1115",
+}
+
+LIGHT_THEME = {
+    "--bg": "#f7f7f8", "--panel": "#ffffff", "--text": "#1d1f23", "--muted": "#61666f",
+    "--border": "#d8dbe0", "--accent": "#2b6cb0", "--edge": "#8a909a", "--record": "#3d4451",
+    "--unresolved": "#a0a4ab", "--high-bg": "#fde2e1", "--high-border": "#d93a33",
+    "--medium-bg": "#fdf1d6", "--medium-border": "#c98a0c", "--low-bg": "#e1f3e6",
+    "--low-border": "#2f8a4e", "--badge-bg": "#e6ecf7", "--accent-contrast": "#ffffff",
+}
+
+STORAGE_PRELUDE = """
+var STORE = %s;
+var window = { localStorage: {
+    getItem: function (k) { return k in STORE ? STORE[k] : null; },
+    setItem: function (k, v) { STORE[k] = String(v); }
+} };
+document.documentElement = new Elem('html');
+"""
+
+THROWING_STORAGE_PRELUDE = """
+var window = { localStorage: {
+    getItem: function () { throw new Error('denied'); },
+    setItem: function () { throw new Error('denied'); }
+} };
+document.documentElement = new Elem('html');
+"""
+
+THEME_TAIL = """
+var states = [themeState()];
+click(themeButton());
+states.push(themeState());
+click(themeButton());
+states.push(themeState());
+console.log(JSON.stringify(states));
+"""
+
 
 class ScriptMapTest(unittest.TestCase):
     def setUp(self):
@@ -1017,7 +1078,8 @@ var u = 'CUSTOMRECORD99';
                       "Pick an area to see its record types and scripts.", "In this area:",
                       "Other scripts that touch this record", "No scripts found",
                       "Order within a step follows deployment order in NetSuite, "
-                      "which isn't in the code.", "prefers-color-scheme",
+                      "which isn't in the code.", "Search scripts", "Light mode", "Dark mode",
+                      "script-map-theme",
                       "Summary", "AI summary", "From header comment", "No description",
                       "Last updated", "Refresh data", "Refresh requested.",
                       "Refresh failed (HTTP ", "Refresh failed (network error).",
@@ -1047,15 +1109,26 @@ var u = 'CUSTOMRECORD99';
             result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def run_header_in_node(self, argv, tail="report();"):
+    def run_header_in_node(self, argv, tail="report();", prelude="", repos=None):
         """Render a page, run its inline script in node against a tiny DOM shim and
-        return a description of the resulting header (or whatever tail prints)."""
+        return a description of the resulting header (or whatever tail prints).
+        `prelude` runs after the shim and before the page script; `repos` maps a label
+        to {relative path: source} to render instead of the default one-script repo."""
         node = shutil.which("node")
         if node is None:
             self.fail("node is required for the header behavior check but was not found")
-        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
-        self.write("a/ue.js", USER_EVENT)
-        code, _, err = self.run_main(["--repo", f"RTMH={repo}", "--out", str(self.out),
+        if repos is None:
+            repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+            self.write("a/ue.js", USER_EVENT)
+            repo_args = ["--repo", f"RTMH={repo}"]
+        else:
+            repo_args = []
+            for label, files in repos.items():
+                repo = self.make_repo(label.lower(), "ref: refs/heads/sandbox\n")
+                for rel, source in files.items():
+                    self.write(f"{label.lower()}/{rel}", source)
+                repo_args += ["--repo", f"{label}={repo}"]
+        code, _, err = self.run_main(repo_args + ["--out", str(self.out),
                                       "--branch", "sandbox", "--title", "Map"] + list(argv))
         self.assertEqual(code, 0, err)
         page = self.out.read_text(encoding="utf-8")
@@ -1064,6 +1137,7 @@ var u = 'CUSTOMRECORD99';
                 if "type=" not in (m.group(1) or "")][0]
         js = self.root / "header_check.js"
         js.write_text(DOM_SHIM + "\nvar DATA_TEXT = " + json.dumps(payload) + ";\n"
+                      + prelude + "\n"
                       + "setup();\n" + body + "\n" + tail + "\n", encoding="utf-8")
         result = subprocess.run([node, str(js)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1156,6 +1230,283 @@ var u = 'CUSTOMRECORD99';
             {"disabled_during": True, "disabled": False,
              "status": "Request failed (network error)."},
         ])
+
+    # Theme toggle and script search
+
+    def css_rule(self, text, selector):
+        match = re.search(r"(?m)^" + re.escape(selector) + r" \{([^}]*)\}", text)
+        self.assertIsNotNone(match, selector)
+        decls = {}
+        for part in match.group(1).split(";"):
+            if part.strip():
+                key, value = part.split(":", 1)
+                decls[key.strip()] = value.strip()
+        return decls
+
+    def test_template_theme_palettes(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.assertNotIn("prefers-color-scheme", text)
+        self.assertEqual(self.css_rule(text, ":root"), DARK_THEME)
+        self.assertEqual(self.css_rule(text, ':root[data-theme="light"]'), LIGHT_THEME)
+        self.assertEqual(text.count(":root {"), 1)
+        self.assertEqual(text.count(':root[data-theme="light"] {'), 1)
+
+    def test_template_accent_contrast_on_active_rules(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        for selector in (".env-toggle .active", "nav button.active", "#rec-chips button.active"):
+            with self.subTest(selector=selector):
+                rule = self.css_rule(text, selector)
+                self.assertEqual(rule["background"], "var(--accent)")
+                self.assertEqual(rule["color"], "var(--accent-contrast)")
+        self.assertNotRegex(text, r"color:\s*#fff\b")
+
+    def test_template_regenerate_button_style(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        rule = self.css_rule(text, ".regen button")
+        self.assertEqual(rule["background"], "var(--accent)")
+        self.assertEqual(rule["border-color"], "var(--accent)")
+        self.assertEqual(rule["color"], "var(--accent-contrast)")
+        self.assertEqual(rule["font-weight"], "600")
+        self.assertEqual(self.css_rule(text, ".regen button:disabled"),
+                         {"cursor": "default", "opacity": "0.6"})
+
+    def test_template_search_markup(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        search = ('<input type="search" id="script-search" list="script-search-options" '
+                  'placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">')
+        datalist = '<datalist id="script-search-options"></datalist>'
+        self.assertEqual(text.count(search), 1)
+        self.assertEqual(text.count(datalist), 1)
+        chips = text.index('<div id="repo-chips"></div>')
+        nav = text.index("<nav>")
+        self.assertLess(chips, text.index(search))
+        self.assertLess(text.index(search), text.index(datalist))
+        self.assertLess(text.index(datalist), nav)
+        self.assertIn("#script-search { width: 100%; }", text)
+
+    def test_rendered_page_has_two_script_tags(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--refresh-url", "/api/rebuild"])
+        self.assertEqual(code, 0, err)
+        page = self.out.read_text(encoding="utf-8")
+        self.assertEqual(page.count("<script"), 2)
+        self.assertEqual(len(SCRIPT_TAG_RE.findall(page)), 2)
+        self.assertNotIn("<link", page)
+
+    def test_theme_defaults_to_dark_without_window(self):
+        states = self.run_header_in_node([], THEME_TAIL)
+        self.assertEqual(states[0], {
+            "tag": "button", "type": "button", "text": "Light mode",
+            "aria": "Switch to light mode", "last": True, "data_theme": None, "stored": None})
+        # No document.documentElement: the button still toggles.
+        self.assertEqual(states[1]["text"], "Dark mode")
+        self.assertEqual(states[1]["aria"], "Switch to dark mode")
+        self.assertEqual(states[2]["text"], "Light mode")
+
+    def test_theme_toggle_is_last_after_env_toggle_and_refresh(self):
+        header = self.run_header_in_node(
+            ["--switch-url", "/sandbox.html", "--switch-label", "Sandbox",
+             "--refresh-url", "/api/rebuild"])
+        self.assertEqual(header["order"][:3], ["h1", "span.env-badge", "span.env-toggle"])
+        self.assertEqual(header["order"][-1], "button")
+        self.assertEqual(header["order"].count("button"), 1)
+
+    def test_theme_click_writes_storage_and_sets_data_theme(self):
+        states = self.run_header_in_node([], THEME_TAIL, STORAGE_PRELUDE % "{}")
+        self.assertEqual(states, [
+            {"tag": "button", "type": "button", "text": "Light mode",
+             "aria": "Switch to light mode", "last": True, "data_theme": "dark", "stored": None},
+            {"tag": "button", "type": "button", "text": "Dark mode",
+             "aria": "Switch to dark mode", "last": True, "data_theme": "light",
+             "stored": "light"},
+            {"tag": "button", "type": "button", "text": "Light mode",
+             "aria": "Switch to light mode", "last": True, "data_theme": "dark",
+             "stored": "dark"},
+        ])
+
+    def test_theme_stored_values(self):
+        cases = {"light": "light", "LIGHT": "dark", " light": "dark", "1": "dark",
+                 "": "dark", "dark": "dark"}
+        for stored, expected in cases.items():
+            with self.subTest(stored=stored):
+                prelude = STORAGE_PRELUDE % json.dumps({"script-map-theme": stored})
+                states = self.run_header_in_node([], THEME_TAIL, prelude)
+                self.assertEqual(states[0]["data_theme"], expected)
+                self.assertEqual(states[0]["text"],
+                                 "Dark mode" if expected == "light" else "Light mode")
+
+    def test_theme_throwing_storage_loads_dark_and_still_toggles(self):
+        states = self.run_header_in_node([], THEME_TAIL, THROWING_STORAGE_PRELUDE)
+        self.assertEqual([(s["text"], s["data_theme"]) for s in states], [
+            ("Light mode", "dark"), ("Dark mode", "light"), ("Light mode", "dark")])
+
+    def run_search_in_node(self, tail):
+        return self.run_header_in_node([], tail, "enableQuerySelector();", SEARCH_REPOS)
+
+    def test_search_datalist_options(self):
+        snap = self.run_search_in_node("console.log(JSON.stringify(snapshot()));")
+        values = [o["value"] for o in snap["options"]]
+        self.assertEqual(sorted(values), ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual({o["tag"] for o in snap["options"]}, {"option"})
+        expected = subprocess.run(
+            [shutil.which("node"), "-e",
+             "console.log(JSON.stringify(%s.sort(function (a, b) { return a.localeCompare(b); })))"
+             % json.dumps(["req_other.js", "Req.Dep.js", "hold.js"])],
+            capture_output=True, text=True)
+        self.assertEqual(values, json.loads(expected.stdout))
+
+    def test_search_datalist_dedups_names_across_repos(self):
+        repos = {"RTMH": {"ue.js": USER_EVENT}, "WCS": {"ue.js": USER_EVENT}}
+        snap = self.run_header_in_node([], "console.log(JSON.stringify(snapshot()));",
+                                       "enableQuerySelector();", repos)
+        self.assertEqual([o["value"] for o in snap["options"]], ["ue.js"])
+        self.assertEqual(snap["list_heading"], "2 scripts")
+
+    def test_search_filters_inventory_and_risk(self):
+        tail = """
+var out = {};
+out.none = snapshot();
+['REQ', '  req ', 'req.', 'zzz', '   ', 'hold'].forEach(function (q) {
+    typeSearch(q);
+    out[q] = snapshot();
+});
+console.log(JSON.stringify(out));
+"""
+        out = self.run_search_in_node(tail)
+        everyone = ["Req.Dep.js", "hold.js", "req_other.js"]
+        self.assertEqual(sorted(out["none"]["list"]), everyone)
+        self.assertEqual(out["none"]["list_heading"], "3 scripts")
+        self.assertEqual(sorted(out["none"]["risk"]), everyone)
+        for q in ("REQ", "  req "):
+            with self.subTest(q=q):
+                self.assertEqual(sorted(out[q]["list"]), ["Req.Dep.js", "req_other.js"])
+                self.assertEqual(out[q]["list_heading"], "2 scripts")
+                self.assertEqual(sorted(out[q]["risk"]), ["Req.Dep.js", "req_other.js"])
+        # A literal "." (no RegExp): "req." matches Req.Dep.js but not req_other.js.
+        self.assertEqual(out["req."]["list"], ["Req.Dep.js"])
+        self.assertEqual(out["req."]["risk"], ["Req.Dep.js"])
+        self.assertEqual(out["zzz"]["list"], [])
+        self.assertEqual(out["zzz"]["list_heading"], "0 scripts")
+        self.assertEqual(out["zzz"]["list_empty"], ["No scripts found"])
+        self.assertEqual(out["zzz"]["risk"], [])
+        self.assertEqual(out["zzz"]["risk_empty"], ["No scripts found"])
+        self.assertEqual(sorted(out["   "]["list"]), everyone)
+        self.assertEqual(sorted(out["   "]["risk"]), everyone)
+        self.assertEqual(out["hold"]["list"], ["hold.js"])
+        # Tiles and the matrix ignore the search.
+        for q in ("REQ", "req.", "zzz", "hold"):
+            with self.subTest(q=q):
+                self.assertEqual(out[q]["tiles"], out["none"]["tiles"])
+                self.assertEqual(out[q]["matrix"], out["none"]["matrix"])
+                self.assertEqual(out[q]["search"], q)
+        self.assertIn("Total scripts3", out["zzz"]["tiles"])
+
+    def test_search_does_not_match_path_or_summary(self):
+        repos = {"RTMH": {"Sub/Req/ue.js": USER_EVENT}}
+        out = self.run_header_in_node(
+            [], "typeSearch('req'); console.log(JSON.stringify(snapshot()));",
+            "enableQuerySelector();", repos)
+        self.assertEqual(out["list"], [])
+        self.assertEqual(out["risk_empty"], ["No scripts found"])
+
+    def test_search_combines_with_filters_and_clear_resets(self):
+        tail = """
+var out = {};
+var iType = byIdMap['i-type'];
+iType.value = 'ClientScript';
+iType.listeners.change.forEach(function (fn) { fn({}); });
+out.type_only = snapshot();
+typeSearch('dep');
+out.type_and_search = snapshot();
+click(byIdMap['i-clear']);
+out.cleared = snapshot();
+out.cleared_type = iType.value;
+console.log(JSON.stringify(out));
+"""
+        out = self.run_search_in_node(tail)
+        self.assertEqual(out["type_only"]["list"], ["req_other.js"])
+        self.assertEqual(out["type_and_search"]["list"], [])
+        self.assertEqual(out["type_and_search"]["risk"], ["Req.Dep.js"])
+        self.assertEqual(out["cleared"]["search"], "")
+        self.assertEqual(out["cleared_type"], "")
+        self.assertEqual(sorted(out["cleared"]["list"]), ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(sorted(out["cleared"]["risk"]), ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(len(out["cleared"]["areas"]), 4)
+
+    def test_search_filters_records(self):
+        tail = """
+var out = {};
+function areaCard(name) {
+    return byIdMap['rec-cards'].children.filter(function (c) {
+        return c.children[0].textContent === name;
+    })[0];
+}
+function chip(prefix) {
+    return byIdMap['rec-chips'].children.filter(function (c) {
+        return c.textContent.indexOf(prefix) === 0;
+    })[0];
+}
+out.none = snapshot();
+click(areaCard('Custom records'));
+out.none_area = snapshot();
+click(chip('Sales Order Hold'));
+out.none_record = snapshot();
+typeSearch('req');
+out.req_record = snapshot();
+click(chip('All Custom records'));
+out.req_area = snapshot();
+typeSearch('hold');
+out.hold = snapshot();
+typeSearch('zzz');
+out.zzz = snapshot();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_search_in_node(tail)
+        self.assertEqual(out["none"]["areas"], [
+            ["Sales", "1 scripts", "1 record types"],
+            ["Billing / AR", "1 scripts", "1 record types"],
+            ["Entities", "1 scripts", "1 record types"],
+            ["Custom records", "2 scripts", "1 record types"],
+        ])
+        self.assertEqual(out["none"]["missing"], ["RTMH: req_other.js"])
+        self.assertTrue(out["none"]["missing_count"].startswith("1 "))
+        self.assertEqual(out["none_area"]["rec_chips"], [
+            "All Custom records", "Sales Order Hold [customrecord2326] · 2"])
+        self.assertEqual(sorted(out["none_area"]["rec_list"]), ["Req.Dep.js", "hold.js"])
+        self.assertEqual(out["none_record"]["lanes"], [["beforeLoad", "Req.Dep.js", "hold.js"]])
+        # With a query the selected record keeps only the matching script.
+        self.assertEqual(out["req_record"]["areas"], [
+            ["Sales", "1 scripts", "1 record types"],
+            ["Entities", "1 scripts", "1 record types"],
+            ["Custom records", "1 scripts", "1 record types"],
+        ])
+        self.assertEqual(out["req_record"]["rec_chips"], [
+            "All Custom records", "Sales Order Hold [customrecord2326] · 1"])
+        self.assertEqual(out["req_record"]["lanes"], [["beforeLoad", "Req.Dep.js"]])
+        self.assertEqual(out["req_record"]["missing"], ["RTMH: req_other.js"])
+        self.assertEqual(out["req_area"]["rec_list_heading"], "1 scripts")
+        self.assertEqual(out["req_area"]["rec_list"], ["Req.Dep.js"])
+        self.assertEqual(out["hold"]["areas"], [
+            ["Billing / AR", "1 scripts", "1 record types"],
+            ["Custom records", "1 scripts", "1 record types"],
+        ])
+        self.assertEqual(out["hold"]["rec_list"], ["hold.js"])
+        self.assertEqual(out["hold"]["missing"], [])
+        self.assertTrue(out["hold"]["missing_count"].startswith("0 "))
+        self.assertEqual(out["zzz"]["areas"], [])
+        self.assertEqual(out["zzz"]["rec_chips"], ["No scripts found"])
+
+    def test_search_with_zero_scripts(self):
+        repos = {"RTMH": {"README.txt": "nothing here"}}
+        out = self.run_header_in_node(
+            [], "typeSearch('x'); console.log(JSON.stringify(snapshot()));",
+            "enableQuerySelector();", repos)
+        self.assertEqual(out["options"], [])
+        self.assertEqual(out["list_empty"], ["No scripts found"])
+        self.assertEqual(out["risk_empty"], ["No scripts found"])
+        self.assertEqual(out["rec_chips"], ["No scripts found"])
 
 
 DOM_SHIM = r"""
@@ -1308,6 +1659,76 @@ function regenerate(replies) {
             clicks: clicks
         }));
     }());
+}
+
+function click(target) {
+    ((target.listeners || {}).click || []).forEach(function (fn) { fn({}); });
+}
+
+function typeSearch(q) {
+    var input = byIdMap['script-search'];
+    input.value = q;
+    ((input.listeners || {}).input || []).forEach(function (fn) { fn({}); });
+}
+
+function enableQuerySelector() {
+    Elem.prototype.querySelector = function (tag) {
+        return walk(this, function (c) { return c.tagName === tag; })[0] || null;
+    };
+}
+
+function themeButton() {
+    return header.children.filter(function (c) { return c.id === 'theme-toggle'; })[0] || null;
+}
+
+function themeState() {
+    var b = themeButton();
+    return {
+        tag: b ? b.tagName : null,
+        type: b ? b.type : null,
+        text: b ? b.textContent : null,
+        aria: b ? b.getAttribute('aria-label') : null,
+        last: header.children[header.children.length - 1] === b,
+        data_theme: document.documentElement ?
+            document.documentElement.getAttribute('data-theme') : null,
+        stored: typeof STORE === 'undefined' ? null : STORE['script-map-theme'] || null
+    };
+}
+
+function snapshot() {
+    function textOf(c) { return c.textContent; }
+    function names(id) {
+        return walk(byIdMap[id], function (c) { return c.className === 'name'; }).map(textOf);
+    }
+    function empties(id) {
+        return walk(byIdMap[id], function (c) { return c.className === 'empty'; }).map(textOf);
+    }
+    return {
+        search: byIdMap['script-search'].value,
+        options: byIdMap['script-search-options'].children.map(function (o) {
+            return { tag: o.tagName, value: o.value };
+        }),
+        list_heading: byIdMap['i-list-heading'].textContent,
+        list: names('i-list'),
+        list_empty: empties('i-list'),
+        tiles: byIdMap['i-tiles'].textContent,
+        matrix: byIdMap['i-matrix'].textContent,
+        risk: names('r-grid'),
+        risk_empty: empties('r-grid'),
+        areas: byIdMap['rec-cards'].children.map(function (c) { return c.children.map(textOf); }),
+        rec_chips: byIdMap['rec-chips'].children.map(textOf),
+        rec_list_heading: byIdMap['rec-list-heading'].textContent,
+        rec_list: names('rec-list'),
+        lanes: byIdMap['rec-detail'].children.filter(function (c) {
+            return c.className === 'lane';
+        }).map(function (c) {
+            return [c.children[0].textContent].concat(c.children[1].children.map(function (li) {
+                return li.children[0].textContent;
+            }));
+        }),
+        missing_count: byIdMap['rec-missing-count'].textContent,
+        missing: byIdMap['rec-missing-list'].children.map(textOf)
+    };
 }
 """
 

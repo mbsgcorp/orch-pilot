@@ -6,6 +6,25 @@
 <title>Script map</title>
 <style>
 :root {
+    --bg: #15171b;
+    --panel: #1e2126;
+    --text: #e6e8eb;
+    --muted: #9aa0a9;
+    --border: #363a42;
+    --accent: #6ea8ec;
+    --edge: #6b717b;
+    --record: #c6cbd3;
+    --unresolved: #5c6068;
+    --high-bg: #3d1f1e;
+    --high-border: #f0675f;
+    --medium-bg: #3a3018;
+    --medium-border: #e3ac3b;
+    --low-bg: #1c3324;
+    --low-border: #5cc27f;
+    --badge-bg: #2a3242;
+    --accent-contrast: #0f1115;
+}
+:root[data-theme="light"] {
     --bg: #f7f7f8;
     --panel: #ffffff;
     --text: #1d1f23;
@@ -22,26 +41,7 @@
     --low-bg: #e1f3e6;
     --low-border: #2f8a4e;
     --badge-bg: #e6ecf7;
-}
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #15171b;
-        --panel: #1e2126;
-        --text: #e6e8eb;
-        --muted: #9aa0a9;
-        --border: #363a42;
-        --accent: #6ea8ec;
-        --edge: #6b717b;
-        --record: #c6cbd3;
-        --unresolved: #5c6068;
-        --high-bg: #3d1f1e;
-        --high-border: #f0675f;
-        --medium-bg: #3a3018;
-        --medium-border: #e3ac3b;
-        --low-bg: #1c3324;
-        --low-border: #5cc27f;
-        --badge-bg: #2a3242;
-    }
+    --accent-contrast: #ffffff;
 }
 * { box-sizing: border-box; }
 body {
@@ -110,7 +110,17 @@ header h1 { font-size: 18px; margin: 0; }
 .env-toggle > * { padding: 2px 10px; }
 .env-toggle a { color: var(--accent); text-decoration: none; background: var(--panel); }
 .env-toggle a:hover, .env-toggle a:focus { text-decoration: underline; }
-.env-toggle .active { background: var(--accent); color: #fff; font-weight: 600; }
+.env-toggle .active { background: var(--accent); color: var(--accent-contrast); font-weight: 600; }
+#theme-toggle, #script-search {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+#theme-toggle { cursor: pointer; }
 .missing-repos { flex-basis: 100%; color: var(--muted); font-size: 12px; margin: 0; }
 nav { display: flex; gap: 4px; margin-left: auto; }
 nav button, .controls select, .controls button {
@@ -122,7 +132,7 @@ nav button, .controls select, .controls button {
     padding: 4px 10px;
 }
 nav button, .controls button { cursor: pointer; }
-nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+nav button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 main { padding: 12px 16px; }
 .view[hidden] { display: none; }
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
@@ -194,9 +204,11 @@ main { padding: 12px 16px; }
 .regen button {
     font: inherit;
     font-size: 12px;
-    color: var(--text);
-    background: var(--panel);
+    font-weight: 600;
+    color: var(--accent-contrast);
+    background: var(--accent);
     border: 1px solid var(--border);
+    border-color: var(--accent);
     border-radius: 6px;
     padding: 2px 8px;
     cursor: pointer;
@@ -226,7 +238,7 @@ main { padding: 12px 16px; }
     text-align: left;
     word-break: break-word;
 }
-#rec-chips button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+#rec-chips button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .kind { color: var(--muted); font-size: 12px; }
 .note { color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
 .lane, .other {
@@ -274,6 +286,7 @@ main { padding: 12px 16px; }
     .tile { flex: 1 1 100px; }
     .matrix-wrap { overflow-x: auto; max-width: 100%; }
     #skipped { margin: 8px; }
+    #script-search { width: 100%; }
 }
 </style>
 </head>
@@ -282,6 +295,8 @@ main { padding: 12px 16px; }
     <h1 id="title">Script map</h1>
     <span id="generated"></span>
     <div id="repo-chips"></div>
+    <input type="search" id="script-search" list="script-search-options" placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">
+    <datalist id="script-search-options"></datalist>
     <nav>
         <button type="button" data-view="inventory">Inventory</button>
         <button type="button" data-view="records">Records</button>
@@ -410,6 +425,47 @@ main { padding: 12px 16px; }
         }
         envBadge.parentNode.insertBefore(envToggle, envBadge.nextSibling);
     }
+
+    var THEME_KEY = 'script-map-theme';
+    function readTheme() {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage &&
+                    window.localStorage.getItem(THEME_KEY) === 'light') {
+                return 'light';
+            }
+        } catch (e) {
+            // Storage is unavailable, so the default dark theme is used.
+        }
+        return 'dark';
+    }
+    function writeTheme(theme) {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.setItem(THEME_KEY, theme);
+            }
+        } catch (e) {
+            // Storage is unavailable, so the choice only lasts for this page view.
+        }
+    }
+    var themeButton = el('button');
+    themeButton.type = 'button';
+    themeButton.id = 'theme-toggle';
+    var theme = readTheme();
+    function applyTheme(next) {
+        theme = next;
+        if (document.documentElement) {
+            document.documentElement.setAttribute('data-theme', theme);
+        }
+        themeButton.textContent = theme === 'light' ? 'Dark mode' : 'Light mode';
+        themeButton.setAttribute('aria-label',
+            theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode');
+    }
+    applyTheme(theme);
+    themeButton.addEventListener('click', function () {
+        applyTheme(theme === 'light' ? 'dark' : 'light');
+        writeTheme(theme);
+    });
+    titleEl.parentNode.appendChild(themeButton);
     function plural(n, unit) { return n + ' ' + unit + (n === 1 ? '' : 's') + ' ago'; }
 
     function relativeTime(ms) {
@@ -565,6 +621,21 @@ main { padding: 12px 16px; }
         });
         select.value = values.indexOf(current) !== -1 ? current : ALL;
         return select.value;
+    }
+
+    // Search
+    var searchInput = document.getElementById('script-search');
+    var searchOptions = document.getElementById('script-search-options');
+    distinct(scripts, 'name').sort(function (a, b) { return a.localeCompare(b); }).forEach(function (name) {
+        var opt = document.createElement('option');
+        opt.value = name;
+        searchOptions.appendChild(opt);
+    });
+
+    function matchesSearch(s) {
+        var query = String(searchInput.value || '').trim().toLowerCase();
+        if (!query) { return true; }
+        return s.name.toLowerCase().indexOf(query) !== -1;
     }
 
     function clientScripts() {
@@ -796,7 +867,7 @@ main { padding: 12px 16px; }
     function renderList(list) {
         clear(iList);
         var shown = list.filter(function (s) {
-            return (filter.type === ALL || s.type === filter.type) &&
+            return matchesSearch(s) && (filter.type === ALL || s.type === filter.type) &&
                 (filter.version === ALL || s.version === filter.version);
         });
         shown.sort(function (a, b) {
@@ -832,7 +903,14 @@ main { padding: 12px 16px; }
     iRepo.addEventListener('change', renderInventory);
     iType.addEventListener('change', function () { setFilter(iType.value, filter.version); });
     iVersion.addEventListener('change', function () { setFilter(filter.type, iVersion.value); });
-    iClear.addEventListener('click', function () { setFilter(ALL, ALL); });
+    iClear.addEventListener('click', function () {
+        searchInput.value = '';
+        filter.type = ALL;
+        filter.version = ALL;
+        iType.value = ALL;
+        iVersion.value = ALL;
+        renderAll();
+    });
 
     // Records
     var recRepo = document.getElementById('rec-repo');
@@ -858,7 +936,9 @@ main { padding: 12px 16px; }
         var areas = Object.create(null);
         records.forEach(function (r) {
             if (!inRepo(r, repo)) { return; }
-            var connected = links[r.id].filter(function (l) { return byId[l.other].kind === 'script'; });
+            var connected = links[r.id].filter(function (l) {
+                return byId[l.other].kind === 'script' && matchesSearch(byId[l.other]);
+            });
             if (!connected.length) { return; }
             var area = areas[r.category];
             if (!area) { area = areas[r.category] = { scripts: {}, groups: Object.create(null) }; }
@@ -894,7 +974,7 @@ main { padding: 12px 16px; }
         var out = [];
         group.nodes.forEach(function (r) {
             recordScripts(r, kind).forEach(function (s) {
-                if (!seen[s.id]) { seen[s.id] = true; out.push(s); }
+                if (!seen[s.id] && matchesSearch(s)) { seen[s.id] = true; out.push(s); }
             });
         });
         return out;
@@ -914,7 +994,7 @@ main { padding: 12px 16px; }
     function renderMissing() {
         var repo = recRepo.value;
         var missing = scripts.filter(function (s) {
-            return inRepo(s, repo) && !s.has_deploy_line &&
+            return inRepo(s, repo) && matchesSearch(s) && !s.has_deploy_line &&
                 (s.type === 'UserEventScript' || s.type === 'ClientScript');
         });
         recMissingCount.textContent = missing.length +
@@ -977,7 +1057,7 @@ main { padding: 12px 16px; }
             g.nodes.forEach(function (r) {
                 links[r.id].forEach(function (l) {
                     var s = byId[l.other];
-                    if (s.kind !== 'script') { return; }
+                    if (s.kind !== 'script' || !matchesSearch(s)) { return; }
                     if (!seen[s.id]) { seen[s.id] = true; list.push(s); inArea[s.id] = []; }
                     var text = g.label + ' (' + l.kind + ')';
                     if (inArea[s.id].indexOf(text) === -1) { inArea[s.id].push(text); }
@@ -1096,7 +1176,7 @@ main { padding: 12px 16px; }
     function renderRisk() {
         clear(rGrid);
         var repo = rRepo.value;
-        var list = scripts.filter(function (s) { return inRepo(s, repo); });
+        var list = scripts.filter(function (s) { return inRepo(s, repo) && matchesSearch(s); });
         if (!list.length) {
             rGrid.appendChild(el('p', 'empty', 'No scripts found'));
             return;
@@ -1127,6 +1207,13 @@ main { padding: 12px 16px; }
         });
     }
     rRepo.addEventListener('change', renderRisk);
+
+    function renderAll() {
+        renderFiltered();
+        renderRecords();
+        renderRisk();
+    }
+    searchInput.addEventListener('input', renderAll);
 
     // Skipped files
     var skipped = data.skipped || [];
