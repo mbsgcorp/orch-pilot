@@ -5,6 +5,7 @@ Usage: python3 tools/script_map_summarize.py --repo LABEL=PATH [--repo LABEL=PAT
                                              --cache FILE --command "CMD" [--max-chars N]
                                              [--limit N] [--timeout SECONDS]
                                              [--branch NAME] [--namespace NAME]
+                                             [--force KEY ...]
 
 Summaries come from a local command (for example a subscription CLI such as
 Codex): --command is split like a shell would split it, then run without a
@@ -36,6 +37,16 @@ The cache is JSON: {"version": 1, "entries": {"[NAME|]LABEL:rel/path.js":
 {"sha256", "summary", "model", "generated_at"}}}; "model" holds the --command
 string. The "NAME|" prefix is present only when --namespace NAME is given (for
 example "sandbox|RTMH:x.js"), so prod and sandbox runs keep separate entries.
+
+--force KEY (repeatable) regenerates the summary for that cache key even when
+it is cached: the command is always run for it (no cache or hash reuse), it
+does not count toward --limit but does count toward the failure streak. On
+success the entry is replaced, counted as new, and every other entry (any key,
+any namespace) with the same sha256 gets the same summary, model and
+generated_at. On failure the old entry is kept and the file counts as failed.
+Keys for another namespace than --namespace are ignored; a key in this
+namespace that matches no file found in this run prints
+"warning: --force key not found: KEY" to stderr and is not a failure.
 tools/script_map.py reads it with --summaries. One line is printed:
 "script_map_summarize: C cached, R reused, N new, F failed, D deferred, P pruned -> FILE".
 The exit code is 0 (deferred files alone do not fail a run), 2 on usage, input
@@ -174,6 +185,9 @@ def main(argv=None):
     parser.add_argument("--namespace", default="", metavar="NAME",
                         help="cache key prefix (keys become NAME|LABEL:path) so runs for "
                              "different branches keep separate entries (default none)")
+    parser.add_argument("--force", action="append", default=[], metavar="KEY",
+                        help="cache key ([NAME|]LABEL:path) to regenerate even when cached; "
+                             "repeatable; keys for other namespaces are ignored")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -254,7 +268,14 @@ def main(argv=None):
                 and isinstance(value.get("summary"), str)):
             by_sha.setdefault(value["sha256"], value)
 
+    def key_namespace(key):
+        head = key.split(":", 1)[0]
+        return head.split("|", 1)[0] if "|" in head else ""
+
+    forced = {key for key in args.force if key_namespace(key) == args.namespace}
+
     cached = reused = new = failed = deferred = not_attempted = streak = 0
+    forced_new = 0
     found = set()
     for label, root in repos:
         walk_errors = []
@@ -276,11 +297,12 @@ def main(argv=None):
             is_script, script_type, _ = script_map.classify(text)
             if not is_script:
                 continue
+            force = key in forced
             entry = entries.get(key)
-            if isinstance(entry, dict) and entry.get("sha256") == sha:
+            if not force and isinstance(entry, dict) and entry.get("sha256") == sha:
                 cached += 1
                 continue
-            source = by_sha.get(sha)
+            source = None if force else by_sha.get(sha)
             if source is not None:
                 entries[key] = {
                     "sha256": sha,
@@ -290,7 +312,7 @@ def main(argv=None):
                 }
                 reused += 1
                 continue
-            if args.limit and new >= args.limit:
+            if not force and args.limit and new - forced_new >= args.limit:
                 deferred += 1
                 continue
             if streak >= MAX_FAILURE_STREAK:
@@ -312,7 +334,16 @@ def main(argv=None):
                 "model": args.command,
                 "generated_at": now(),
             }
-            by_sha.setdefault(sha, entries[key])
+            if force:
+                fresh = entries[key]
+                for other, value in entries.items():
+                    if other != key and isinstance(value, dict) and value.get("sha256") == sha:
+                        for field in ("summary", "model", "generated_at"):
+                            value[field] = fresh[field]
+                by_sha[sha] = fresh
+                forced_new += 1
+            else:
+                by_sha.setdefault(sha, entries[key])
             new += 1
             streak = 0
         for exc in walk_errors:
@@ -323,6 +354,9 @@ def main(argv=None):
             print(f"warning: {label}:{rel} summary failed: unreadable: {exc.strerror}",
                   file=sys.stderr)
             failed += 1
+
+    for key in sorted(forced - found):
+        print(f"warning: --force key not found: {key}", file=sys.stderr)
 
     if not_attempted:
         print(f"warning: stopping after {MAX_FAILURE_STREAK} consecutive failures; "

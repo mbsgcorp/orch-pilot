@@ -821,7 +821,7 @@ var u = 'CUSTOMRECORD99';
         scripts = self.scripts(self.collect_one(repo))
 
         def strip(node):
-            return {k: v for k, v in node.items() if k not in ("id", "path")}
+            return {k: v for k, v in node.items() if k not in ("id", "path", "summary_key")}
 
         base = strip(scripts["lf/ue.js"])
         self.assertEqual(base["summary"], "Holds orders.")
@@ -946,6 +946,58 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(err.strip(), f"error: {missing} does not exist")
         self.assertFalse(self.out.exists())
 
+    def test_summary_key_without_namespace(self):
+        repo = self.make_repo("a")
+        self.write("a/Sub/ue.js", USER_EVENT)
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("script_map: 1 scripts, "))
+        node = self.scripts(self.read_data()[1])["Sub/ue.js"]
+        self.assertEqual(node["summary_key"], "A:Sub/ue.js")
+        self.assertEqual(self.scripts(self.collect_one(repo))["Sub/ue.js"]["summary_key"],
+                         "A:Sub/ue.js")
+
+    def test_summary_key_with_namespace(self):
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        self.write("a/Sub/ue.js", USER_EVENT)
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--branch", "sandbox",
+                                        "--summary-namespace", "sandbox"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("script_map: 1 scripts, "))
+        node = self.scripts(self.read_data()[1])["Sub/ue.js"]
+        self.assertEqual(node["id"], "A:Sub/ue.js")
+        self.assertEqual(node["summary_key"], "sandbox|A:Sub/ue.js")
+
+    def test_summary_namespace_does_not_change_summary_lookup(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {"A:ai.js": self.summary_entry(sha, "Own key.")}
+        node = self.scripts(script_map.collect([("A", repo)], entries,
+                                               summary_namespace="sandbox"))["ai.js"]
+        self.assertEqual((node["summary"], node["summary_source"]), ("Own key.", "ai"))
+        self.assertEqual(node["summary_key"], "sandbox|A:ai.js")
+
+    def test_summary_namespace_invalid(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        for value in ("sand box", "a|b", "a:b", "x/y"):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--summary-namespace", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(
+                    err, "error: --summary-namespace must be letters, digits, _ or -\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_help_mentions_summary_namespace(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--summary-namespace", result.stdout)
+
     def test_help_mentions_summaries(self):
         result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
                                 capture_output=True, text=True)
@@ -969,7 +1021,9 @@ var u = 'CUSTOMRECORD99';
                       "Summary", "AI summary", "From header comment", "No description",
                       "Last updated", "Refresh data", "Refresh requested.",
                       "Refresh failed (HTTP ", "Refresh failed (network error).",
-                      "Try again after", "Not included (no "):
+                      "Try again after", "Not included (no ",
+                      "Regenerate summary", "Regeneration requested.", "Already requested at ",
+                      "Request failed (HTTP ", "Request failed (network error)."):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
@@ -993,9 +1047,9 @@ var u = 'CUSTOMRECORD99';
             result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def run_header_in_node(self, argv):
+    def run_header_in_node(self, argv, tail="report();"):
         """Render a page, run its inline script in node against a tiny DOM shim and
-        return a description of the resulting header."""
+        return a description of the resulting header (or whatever tail prints)."""
         node = shutil.which("node")
         if node is None:
             self.fail("node is required for the header behavior check but was not found")
@@ -1010,7 +1064,7 @@ var u = 'CUSTOMRECORD99';
                 if "type=" not in (m.group(1) or "")][0]
         js = self.root / "header_check.js"
         js.write_text(DOM_SHIM + "\nvar DATA_TEXT = " + json.dumps(payload) + ";\n"
-                      + "setup();\n" + body + "\nreport();\n", encoding="utf-8")
+                      + "setup();\n" + body + "\n" + tail + "\n", encoding="utf-8")
         result = subprocess.run([node, str(js)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -1051,6 +1105,58 @@ var u = 'CUSTOMRECORD99';
         self.assertIsNone(header["toggle"])
         self.assertNotIn("span.env-toggle", header["order"])
 
+    def run_regenerate_in_node(self, argv, replies):
+        """Click the first Regenerate summary button once per reply and return what the
+        fake fetch received and the status text after each click."""
+        return self.run_header_in_node(
+            argv, "regenerate(" + json.dumps(replies) + ");")
+
+    def test_regenerate_button_absent_without_refresh_url(self):
+        result = self.run_regenerate_in_node(["--summary-namespace", "sandbox"], [])
+        self.assertEqual(result["entries"], 1)
+        self.assertEqual(result["buttons"], 0)
+
+    def test_regenerate_button_posts_summary_key(self):
+        result = self.run_regenerate_in_node(
+            ["--refresh-url", "/api/rebuild", "--summary-namespace", "sandbox"],
+            [{"status": 202}])
+        self.assertEqual(result["entries"], 1)
+        self.assertEqual(result["buttons"], 1)
+        self.assertEqual(result["button_text"], "Regenerate summary")
+        self.assertEqual(result["status_role"], "status")
+        self.assertFalse(result["in_summary_row"])
+        call = result["calls"][0]
+        self.assertEqual(call["url"], "/api/rebuild")
+        self.assertEqual(call["init"]["method"], "POST")
+        self.assertEqual(call["init"]["headers"], {"content-type": "application/json"})
+        self.assertEqual(json.loads(call["init"]["body"]), {"key": "sandbox|RTMH:ue.js"})
+        self.assertEqual(result["clicks"], [{
+            "disabled_during": True,
+            "status": "Regeneration requested. New summary in about 10 minutes, "
+                      "then reload this page.",
+            "disabled": True}])
+
+    def test_regenerate_button_error_outcomes(self):
+        result = self.run_regenerate_in_node(["--refresh-url", "/api/rebuild"], [
+            {"status": 429, "json": {"requested_at": "2026-10-12T09:58:00Z"}},
+            {"status": 500},
+            {"status": 429, "bad_json": True},
+            {"status": 429, "json": {}},
+            {"throw": True},
+        ])
+        self.assertEqual(json.loads(result["calls"][0]["init"]["body"]), {"key": "RTMH:ue.js"})
+        self.assertEqual(result["clicks"], [
+            {"disabled_during": True, "disabled": False,
+             "status": "Already requested at 09:58 UTC. Try again after 10:08 UTC."},
+            {"disabled_during": True, "disabled": False, "status": "Request failed (HTTP 500)."},
+            {"disabled_during": True, "disabled": False,
+             "status": "Request failed (network error)."},
+            {"disabled_during": True, "disabled": False,
+             "status": "Request failed (network error)."},
+            {"disabled_during": True, "disabled": False,
+             "status": "Request failed (network error)."},
+        ])
+
 
 DOM_SHIM = r"""
 function Elem(tag) {
@@ -1089,10 +1195,15 @@ Elem.prototype.removeChild = function (c) {
 };
 Elem.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
 Elem.prototype.getAttribute = function (k) { return k in this.attrs ? this.attrs[k] : null; };
-Elem.prototype.addEventListener = function () {};
+Elem.prototype.addEventListener = function (type, fn) {
+    (this.listeners = this.listeners || {});
+    (this.listeners[type] = this.listeners[type] || []).push(fn);
+};
 Elem.prototype.querySelector = function () { return null; };
 Elem.prototype.querySelectorAll = function () { return []; };
 function Text(t) { this.textContent = t; this.parentNode = null; this.children = []; }
+Object.setPrototypeOf(Elem.prototype, Node.prototype);
+Object.setPrototypeOf(Text.prototype, Node.prototype);
 
 var byIdMap = {};
 var header = new Elem('header');
@@ -1140,6 +1251,63 @@ function report() {
         chip_classes: chipEls.map(function (c) { return c.className; }),
         missing: missing ? missing.textContent : null
     }));
+}
+
+function walk(root, pred, out) {
+    out = out || [];
+    (root.children || []).forEach(function (c) {
+        if (pred(c)) { out.push(c); }
+        walk(c, pred, out);
+    });
+    return out;
+}
+
+function regenerate(replies) {
+    var list = byIdMap['i-list'];
+    var entries = walk(list, function (c) { return c.tagName === 'details'; });
+    var buttons = walk(list, function (c) {
+        return c.tagName === 'button' && c.textContent === 'Regenerate summary';
+    });
+    var summaryRows = walk(list, function (c) { return c.tagName === 'summary'; });
+    var inSummaryRow = summaryRows.some(function (row) {
+        return walk(row, function (c) { return c.tagName === 'button'; }).length > 0;
+    });
+    var calls = [];
+    var clicks = [];
+    var button = buttons[0];
+    var status = button ? button.parentNode.children[1] : null;
+    function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+    (async function () {
+        for (var i = 0; i < replies.length; i++) {
+            var reply = replies[i];
+            fetch = function (url, init) {
+                calls.push({ url: url, init: init });
+                if (reply['throw']) { return Promise.reject(new Error('offline')); }
+                return Promise.resolve({
+                    status: reply.status,
+                    json: function () {
+                        return reply.bad_json ? Promise.reject(new SyntaxError('bad'))
+                            : Promise.resolve(reply.json);
+                    }
+                });
+            };
+            button.disabled = false;
+            button.listeners.click.forEach(function (fn) { fn({}); });
+            var during = button.disabled;
+            for (var k = 0; k < 5; k++) { await tick(); }
+            clicks.push({ disabled_during: during, status: status.textContent,
+                          disabled: button.disabled });
+        }
+        console.log(JSON.stringify({
+            entries: entries.length,
+            buttons: buttons.length,
+            button_text: button ? button.textContent : null,
+            status_role: status ? status.getAttribute('role') : null,
+            in_summary_row: inSummaryRow,
+            calls: calls,
+            clicks: clicks
+        }));
+    }());
 }
 """
 
