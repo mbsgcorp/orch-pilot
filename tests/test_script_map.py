@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -620,6 +621,129 @@ var u = 'CUSTOMRECORD99';
         self.assertRegex(result.stdout, r"^script_map: 1 scripts, \d+ records, \d+ edges, "
                                         r"0 skipped -> .+map\.html\n$")
 
+    # Summaries: header_description
+
+    def test_header_description_tag_with_continuation(self):
+        text = ("/**\n * @NApiVersion 2.1\n * @description Holds sales orders\n"
+                " *   when credit   is low.\n * DEPLOY ON: salesorder\n *\n"
+                " * @NScriptType UserEventScript\n */\n")
+        self.assertEqual(script_map.header_description(text),
+                         "Holds sales orders when credit is low.")
+
+    def test_header_description_untagged_lines(self):
+        text = ("// lead\n  /**\n   * Creates hold records.\n   ** Runs nightly.\n"
+                "   * deploy on: invoice\n   *\n   * @NApiVersion 2.1\n   * Ignored.\n   */")
+        self.assertEqual(script_map.header_description(text),
+                         "Creates hold records. Runs nightly.")
+
+    def test_header_description_deploy_only_and_no_block(self):
+        self.assertEqual(script_map.header_description(USER_EVENT), "")
+        self.assertEqual(script_map.header_description("/** DEPLOY ON: x */"), "")
+        self.assertEqual(script_map.header_description(V1_SCRIPT), "")
+        self.assertEqual(script_map.header_description("/* plain */ x();"), "")
+        self.assertEqual(script_map.header_description("/** never closed"), "")
+
+    def test_header_description_cut_at_300(self):
+        long_line = " ".join(["word"] * 100)  # 499 characters
+        result = script_map.header_description(f"/**\n * {long_line}\n */")
+        self.assertEqual(result, long_line[:300] + "…")
+        self.assertEqual(len(result), 301)
+        exact = "x" * 300
+        self.assertEqual(script_map.header_description(f"/** {exact} */"), exact)
+
+    def test_crlf_and_lone_cr_give_same_nodes(self):
+        repo = self.make_repo("a")
+        lf = USER_EVENT.replace("/**\n", "/**\n * Holds orders.\n")
+        self.write("a/lf/ue.js", lf)
+        self.write("a/crlf/ue.js", lf.replace("\n", "\r\n"))
+        self.write("a/cr/ue.js", lf.replace("\n", "\r"))
+        self.write("a/bad/ue.js", lf.encode("utf-8") + b"// caf\xe9\n")
+        scripts = self.scripts(self.collect_one(repo))
+
+        def strip(node):
+            return {k: v for k, v in node.items() if k not in ("id", "path")}
+
+        base = strip(scripts["lf/ue.js"])
+        self.assertEqual(base["summary"], "Holds orders.")
+        self.assertEqual(base["summary_source"], "header")
+        self.assertEqual(strip(scripts["crlf/ue.js"]), base)
+        self.assertEqual(strip(scripts["cr/ue.js"]), base)
+        bad = strip(scripts["bad/ue.js"])
+        self.assertEqual(bad["entry_points"], ["beforeLoad"])
+        self.assertEqual(bad["summary"], "Holds orders.")
+
+    # Summaries: --summaries
+
+    def write_cache(self, entries, name="cache.json"):
+        path = self.root / name
+        path.write_text(json.dumps({"version": 1, "entries": entries}), encoding="utf-8")
+        return path
+
+    def test_summaries_ai_header_and_empty(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        self.write("a/stale.js", USER_EVENT.replace("/**\n", "/**\n * Header text.\n"))
+        self.write("a/none.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        cache = self.write_cache({
+            "A:ai.js": {"sha256": sha, "summary": "Holds orders.", "model": "m",
+                        "generated_at": "2026-01-01T00:00:00Z"},
+            "A:stale.js": {"sha256": "0" * 64, "summary": "Old.", "model": "m",
+                           "generated_at": "2026-01-01T00:00:00Z"},
+        })
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--summaries", str(cache)])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("script_map: 3 scripts, "))
+        _, data = self.read_data()
+        nodes = self.scripts(data)
+        self.assertEqual((nodes["ai.js"]["summary"], nodes["ai.js"]["summary_source"]),
+                         ("Holds orders.", "ai"))
+        self.assertEqual((nodes["stale.js"]["summary"], nodes["stale.js"]["summary_source"]),
+                         ("Header text.", "header"))
+        self.assertEqual((nodes["none.js"]["summary"], nodes["none.js"]["summary_source"]),
+                         ("", ""))
+
+    def test_summaries_entry_for_other_label_ignored(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {"B:ai.js": {"sha256": sha, "summary": "Other.", "model": "m",
+                               "generated_at": "2026-01-01T00:00:00Z"}}
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual(node["summary_source"], "")
+
+    def test_summaries_invalid_or_missing_cache(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        bad_json = self.root / "bad.json"
+        bad_json.write_text("{not json", encoding="utf-8")
+        wrong_version = self.root / "v2.json"
+        wrong_version.write_text(json.dumps({"version": 2, "entries": {}}), encoding="utf-8")
+        no_entries = self.root / "list.json"
+        no_entries.write_text(json.dumps({"version": 1, "entries": []}), encoding="utf-8")
+        for path in (bad_json, wrong_version, no_entries):
+            with self.subTest(path=path.name):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--summaries", str(path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err.strip(), f"error: {path} is not a valid summary cache")
+                self.assertFalse(self.out.exists())
+        missing = self.root / "missing.json"
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--summaries", str(missing)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(err.strip(), f"error: {missing} does not exist")
+        self.assertFalse(self.out.exists())
+
+    def test_help_mentions_summaries(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--summaries", result.stdout)
+
     # AC10 / AC16: template
 
     def test_template_is_self_contained_and_safe(self):
@@ -633,7 +757,9 @@ var u = 'CUSTOMRECORD99';
                       "Pick an area to see its record types and scripts.", "In this area:",
                       "Other scripts that touch this record", "No scripts found",
                       "Order within a step follows deployment order in NetSuite, "
-                      "which isn't in the code.", "prefers-color-scheme"):
+                      "which isn't in the code.", "prefers-color-scheme",
+                      "Summary", "AI summary", "From header comment", "No description",
+                      "Last updated"):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
