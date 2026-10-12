@@ -217,11 +217,11 @@ class ScriptMapTest(unittest.TestCase):
         real = script_map.branch_status
         calls = []
 
-        def flaky(path):
+        def flaky(path, expected="main"):
             calls.append(path)
             if len(calls) > 1:
                 (Path(path) / ".git" / "HEAD").unlink()
-            return real(path)
+            return real(path, expected)
 
         with mock.patch.object(script_map, "branch_status", flaky):
             code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
@@ -229,6 +229,130 @@ class ScriptMapTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertTrue(err.startswith(f"error: A cannot read {repo / '.git' / 'HEAD'}: "), err)
         self.assertFalse(self.out.exists())
+
+    # Branch, environment and toggle options
+
+    def test_branch_status_expected(self):
+        sandbox = self.make_repo("s", "ref: refs/heads/sandbox\n")
+        main = self.make_repo("m")
+        release = self.make_repo("r", "ref: refs/heads/release/x\n")
+        plain = self.make_repo("p", head=None)
+        self.assertEqual(script_map.branch_status(sandbox, expected="sandbox"), "sandbox")
+        self.assertEqual(script_map.branch_status(main, expected="sandbox"), "main")
+        self.assertEqual(script_map.branch_status(sandbox), "sandbox")
+        self.assertEqual(script_map.branch_status(main), "main")
+        self.assertEqual(script_map.branch_status(release, "release/x"), "release/x")
+        self.assertIsNone(script_map.branch_status(plain, expected="sandbox"))
+
+    def test_branch_sandbox_end_to_end(self):
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        self.write("a/UserEvent/ue.js", USER_EVENT)
+        code, out, err = self.run_main(["--repo", f"RTMH={repo}", "--out", str(self.out),
+                                        "--branch", "sandbox"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertTrue(out.startswith("script_map: 1 scripts, "))
+        _, data = self.read_data()
+        self.assertEqual(data["repos"],
+                         [{"label": "RTMH", "branch": "sandbox", "script_count": 1}])
+        self.assertEqual(data["branch"], "sandbox")
+
+    def test_branch_sandbox_on_main_head_fails(self):
+        repo = self.make_repo("a")
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--branch", "sandbox"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err.strip(), "error: A is on main, not sandbox")
+        self.assertEqual(out, "")
+        self.assertFalse(self.out.exists())
+
+    def test_branch_with_slash(self):
+        repo = self.make_repo("a", "ref: refs/heads/release/x\n")
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--branch", "release/x"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read_data()[1]["repos"][0]["branch"], "release/x")
+
+    def test_invalid_branch(self):
+        repo = self.make_repo("a")
+        for value in ("", "bad branch", "a;b", "x$y"):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--branch", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(err, "error: --branch must be a branch name\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_environment_fields_default(self):
+        repo = self.make_repo("a")
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        _, data = self.read_data()
+        self.assertEqual(data["environment"], "Production")
+        self.assertEqual(data["switch_url"], "")
+        self.assertEqual(data["switch_label"], "")
+        self.assertEqual(data["missing_repos"], [])
+        self.assertEqual(data["branch"], "main")
+        self.assertEqual(data["repos"][0]["branch"], "main")
+
+    def test_environment_fields_set(self):
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        code, out, err = self.run_main([
+            "--repo", f"A={repo}", "--out", str(self.out), "--branch", "sandbox",
+            "--environment", "Sandbox", "--switch-url", "/", "--switch-label", "Production",
+            "--missing-repo", "WCS", "--missing-repo", "ANS Co"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, f"script_map: 0 scripts, 0 records, 0 edges, 0 skipped -> "
+                              f"{self.out}\n")
+        _, data = self.read_data()
+        self.assertEqual(data["environment"], "Sandbox")
+        self.assertEqual(data["switch_url"], "/")
+        self.assertEqual(data["switch_label"], "Production")
+        self.assertEqual(data["missing_repos"], ["WCS", "ANS Co"])
+        self.assertEqual(data["branch"], "sandbox")
+
+    def test_empty_environment_rejected(self):
+        repo = self.make_repo("a")
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--environment", value])
+                self.assertEqual(code, 2)
+                self.assertTrue(err.startswith("error: --environment "), err)
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_switch_url_requires_label(self):
+        repo = self.make_repo("a")
+        for extra in ([], ["--switch-label", ""]):
+            with self.subTest(extra=extra):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--switch-url", "/sandbox.html"] + extra)
+                self.assertEqual(code, 2)
+                self.assertEqual(err, "error: --switch-label is required with --switch-url\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_switch_url_invalid(self):
+        repo = self.make_repo("a")
+        for value in ("sandbox.html", "https://example.test/sandbox.html", "/sand box.html"):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--switch-url", value, "--switch-label", "X"])
+                self.assertEqual(code, 2)
+                self.assertEqual(
+                    err, "error: --switch-url must be a site-relative path starting with /\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
+    def test_help_mentions_environment_options(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ("--branch", "--environment", "--switch-url", "--switch-label",
+                     "--missing-repo"):
+            self.assertIn(flag, result.stdout)
 
     # AC3: input errors
 
@@ -719,7 +843,7 @@ var u = 'CUSTOMRECORD99';
         repo = self.make_repo("a")
         ai = self.write("a/ai.js", USER_EVENT)
         self.write("a/stale.js", USER_EVENT.replace("/**\n", "/**\n * Header text.\n"))
-        self.write("a/none.js", USER_EVENT)
+        self.write("a/none.js", USER_EVENT + "// different content\n")
         sha = hashlib.sha256(ai.read_bytes()).hexdigest()
         cache = self.write_cache({
             "A:ai.js": {"sha256": sha, "summary": "Holds orders.", "model": "m",
@@ -740,14 +864,62 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual((nodes["none.js"]["summary"], nodes["none.js"]["summary_source"]),
                          ("", ""))
 
-    def test_summaries_entry_for_other_label_ignored(self):
+    def test_summaries_entry_for_other_label_with_other_sha_ignored(self):
         repo = self.make_repo("a")
-        ai = self.write("a/ai.js", USER_EVENT)
-        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
-        entries = {"B:ai.js": {"sha256": sha, "summary": "Other.", "model": "m",
+        self.write("a/ai.js", USER_EVENT)
+        entries = {"B:ai.js": {"sha256": "0" * 64, "summary": "Other.", "model": "m",
                                "generated_at": "2026-01-01T00:00:00Z"}}
         node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
         self.assertEqual(node["summary_source"], "")
+
+    def summary_entry(self, sha, summary):
+        return {"sha256": sha, "summary": summary, "model": "m",
+                "generated_at": "2026-01-01T00:00:00Z"}
+
+    def test_summaries_match_by_sha_under_other_key(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        for key in ("B:ai.js", "A:Moved/ai.js", "sandbox|A:ai.js"):
+            with self.subTest(key=key):
+                entries = {key: self.summary_entry(sha, "Shared.")}
+                node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+                self.assertEqual((node["summary"], node["summary_source"]), ("Shared.", "ai"))
+
+    def test_summaries_sha_fallback_first_in_key_order_and_ignores_malformed(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {
+            "sandbox|A:ai.js": self.summary_entry(sha, "Later key."),
+            "C:x.js": self.summary_entry(sha, "First key."),
+            "0:bad.js": "not a dict",
+            "1:nosummary.js": {"sha256": sha},
+            "2:numbersha.js": {"sha256": 5, "summary": "Bad."},
+            "A:ai.js": self.summary_entry("0" * 64, "Stale own key."),
+        }
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual((node["summary"], node["summary_source"]), ("First key.", "ai"))
+
+    def test_summaries_exact_key_wins_over_sha_match(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {"0:other.js": self.summary_entry(sha, "Other key."),
+                   "A:ai.js": self.summary_entry(sha, "Own key.")}
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual((node["summary"], node["summary_source"]), ("Own key.", "ai"))
+
+    def test_summaries_sha_fallback_via_cli(self):
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        cache = self.write_cache({"A:ai.js": self.summary_entry(sha, "Prod summary.")})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--branch", "sandbox", "--summaries", str(cache)])
+        self.assertEqual(code, 0, err)
+        node = self.scripts(self.read_data()[1])["ai.js"]
+        self.assertEqual((node["summary"], node["summary_source"]), ("Prod summary.", "ai"))
 
     def test_summaries_invalid_or_missing_cache(self):
         repo = self.make_repo("a")
@@ -797,7 +969,7 @@ var u = 'CUSTOMRECORD99';
                       "Summary", "AI summary", "From header comment", "No description",
                       "Last updated", "Refresh data", "Refresh requested.",
                       "Refresh failed (HTTP ", "Refresh failed (network error).",
-                      "Try again after"):
+                      "Try again after", "Not included (no "):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
@@ -820,6 +992,156 @@ var u = 'CUSTOMRECORD99';
             js.write_text(body, encoding="utf-8")
             result = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def run_header_in_node(self, argv):
+        """Render a page, run its inline script in node against a tiny DOM shim and
+        return a description of the resulting header."""
+        node = shutil.which("node")
+        if node is None:
+            self.fail("node is required for the header behavior check but was not found")
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        self.write("a/ue.js", USER_EVENT)
+        code, _, err = self.run_main(["--repo", f"RTMH={repo}", "--out", str(self.out),
+                                      "--branch", "sandbox", "--title", "Map"] + list(argv))
+        self.assertEqual(code, 0, err)
+        page = self.out.read_text(encoding="utf-8")
+        payload = DATA_RE.search(page).group(1)
+        body = [m.group(2) for m in SCRIPT_TAG_RE.finditer(page)
+                if "type=" not in (m.group(1) or "")][0]
+        js = self.root / "header_check.js"
+        js.write_text(DOM_SHIM + "\nvar DATA_TEXT = " + json.dumps(payload) + ";\n"
+                      + "setup();\n" + body + "\nreport();\n", encoding="utf-8")
+        result = subprocess.run([node, str(js)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_header_production_badge_and_toggle(self):
+        header = self.run_header_in_node(["--switch-url", "/sandbox.html",
+                                          "--switch-label", "Sandbox"])
+        self.assertEqual(header["document_title"], "Map")
+        self.assertEqual(header["order"][:3], ["h1", "span.env-badge", "span.env-toggle"])
+        self.assertEqual(header["badge"], {"class": "env-badge", "text": "PRODUCTION"})
+        self.assertEqual(header["toggle"], [
+            {"tag": "span", "class": "active", "text": "Production", "href": None,
+             "aria-current": "page"},
+            {"tag": "a", "class": "", "text": "Sandbox", "href": "/sandbox.html",
+             "aria-current": None},
+        ])
+        self.assertEqual(header["chips"], ["RTMH · 1 scripts · sandbox"])
+        self.assertEqual(header["chip_classes"], ["chip"])
+        self.assertIsNone(header["missing"])
+
+    def test_header_sandbox_badge_toggle_and_missing_line(self):
+        header = self.run_header_in_node([
+            "--environment", "Sandbox", "--switch-url", "/", "--switch-label", "Production",
+            "--missing-repo", "WCS", "--missing-repo", "ANS"])
+        self.assertEqual(header["document_title"], "Map (SANDBOX)")
+        self.assertEqual(header["badge"], {"class": "env-badge warn", "text": "SANDBOX"})
+        self.assertEqual(header["toggle"], [
+            {"tag": "a", "class": "", "text": "Production", "href": "/",
+             "aria-current": None},
+            {"tag": "span", "class": "active", "text": "Sandbox", "href": None,
+             "aria-current": "page"},
+        ])
+        self.assertEqual(header["missing"], "Not included (no sandbox branch): WCS, ANS")
+
+    def test_header_without_switch_url_has_no_toggle(self):
+        header = self.run_header_in_node(["--environment", "Sandbox"])
+        self.assertEqual(header["badge"], {"class": "env-badge warn", "text": "SANDBOX"})
+        self.assertIsNone(header["toggle"])
+        self.assertNotIn("span.env-toggle", header["order"])
+
+
+DOM_SHIM = r"""
+function Elem(tag) {
+    this.tagName = tag; this.children = []; this.parentNode = null; this.className = '';
+    this.attrs = {}; this.text = ''; this.hidden = false; this.value = ''; this.style = {};
+    var self = this;
+    this.classList = { toggle: function () {}, add: function () {}, remove: function () {} };
+}
+Object.defineProperty(Elem.prototype, 'textContent', {
+    get: function () { return this.text + this.children.map(function (c) { return c.textContent; }).join(''); },
+    set: function (v) { this.text = String(v); this.children = []; }
+});
+Object.defineProperty(Elem.prototype, 'firstChild', {
+    get: function () { return this.children[0] || null; }
+});
+Object.defineProperty(Elem.prototype, 'nextSibling', {
+    get: function () {
+        if (!this.parentNode) { return null; }
+        var sibs = this.parentNode.children;
+        return sibs[sibs.indexOf(this) + 1] || null;
+    }
+});
+Elem.prototype.appendChild = function (c) {
+    if (c.parentNode) { c.parentNode.removeChild(c); }
+    c.parentNode = this; this.children.push(c); return c;
+};
+Elem.prototype.insertBefore = function (c, ref) {
+    if (c.parentNode) { c.parentNode.removeChild(c); }
+    c.parentNode = this;
+    var i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) { this.children.push(c); } else { this.children.splice(i, 0, c); }
+    return c;
+};
+Elem.prototype.removeChild = function (c) {
+    this.children.splice(this.children.indexOf(c), 1); c.parentNode = null; return c;
+};
+Elem.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+Elem.prototype.getAttribute = function (k) { return k in this.attrs ? this.attrs[k] : null; };
+Elem.prototype.addEventListener = function () {};
+Elem.prototype.querySelector = function () { return null; };
+Elem.prototype.querySelectorAll = function () { return []; };
+function Text(t) { this.textContent = t; this.parentNode = null; this.children = []; }
+
+var byIdMap = {};
+var header = new Elem('header');
+var document = {
+    title: '',
+    createElement: function (t) { return new Elem(t); },
+    createTextNode: function (t) { return new Text(t); },
+    getElementById: function (id) {
+        if (!byIdMap[id]) { byIdMap[id] = new Elem('div'); byIdMap[id].id = id; }
+        return byIdMap[id];
+    },
+    querySelectorAll: function () { return []; }
+};
+function Node() {}
+var setInterval = function () {};
+var fetch = function () { throw new Error('no network'); };
+
+function setup() {
+    ['title', 'generated', 'repo-chips'].forEach(function (id, i) {
+        var e = new Elem(['h1', 'span', 'div'][i]); e.id = id; byIdMap[id] = e; header.appendChild(e);
+    });
+    document.getElementById('script-map-data').text = DATA_TEXT;
+}
+
+function report() {
+    function find(cls) {
+        return header.children.filter(function (c) { return c.className.split(' ').indexOf(cls) !== -1; })[0];
+    }
+    var badge = find('env-badge');
+    var toggle = find('env-toggle');
+    var chips = byIdMap['repo-chips'];
+    var missing = chips.children.filter(function (c) { return c.className === 'missing-repos'; })[0];
+    var chipEls = chips.children.filter(function (c) { return c.className.indexOf('chip') === 0; });
+    console.log(JSON.stringify({
+        document_title: document.title,
+        order: header.children.map(function (c) {
+            return c.tagName + (c.className ? '.' + c.className.split(' ')[0] : '');
+        }),
+        badge: badge ? { 'class': badge.className, text: badge.textContent } : null,
+        toggle: toggle ? toggle.children.map(function (c) {
+            return { tag: c.tagName, 'class': c.className, text: c.textContent,
+                     href: c.getAttribute('href'), 'aria-current': c.getAttribute('aria-current') };
+        }) : null,
+        chips: chipEls.map(function (c) { return c.textContent; }),
+        chip_classes: chipEls.map(function (c) { return c.className; }),
+        missing: missing ? missing.textContent : null
+    }));
+}
+"""
 
 
 if __name__ == "__main__":

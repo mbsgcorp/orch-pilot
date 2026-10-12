@@ -83,6 +83,35 @@ header h1 { font-size: 18px; margin: 0; }
     background: var(--bg);
 }
 .chip.unverified { border-color: var(--medium-border); }
+.env-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    background: var(--bg);
+}
+.env-badge.warn {
+    color: var(--text);
+    background: var(--high-bg);
+    border-color: var(--high-border);
+}
+.env-toggle {
+    display: inline-flex;
+    flex-wrap: wrap;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 12px;
+}
+.env-toggle > * { padding: 2px 10px; }
+.env-toggle a { color: var(--accent); text-decoration: none; background: var(--panel); }
+.env-toggle a:hover, .env-toggle a:focus { text-decoration: underline; }
+.env-toggle .active { background: var(--accent); color: #fff; font-weight: 600; }
+.missing-repos { flex-basis: 100%; color: var(--muted); font-size: 12px; margin: 0; }
 nav { display: flex; gap: 4px; margin-left: auto; }
 nav button, .controls select, .controls button {
     font: inherit;
@@ -340,7 +369,34 @@ main { padding: 12px 16px; }
     // Header
     var title = data.title || 'Script map';
     document.title = title;
-    document.getElementById('title').textContent = title;
+    var titleEl = document.getElementById('title');
+    titleEl.textContent = title;
+    var environment = String(data.environment || 'Production');
+    var envBadge = el('span', 'env-badge' + (environment === 'Production' ? '' : ' warn'),
+        environment.toUpperCase());
+    titleEl.parentNode.insertBefore(envBadge, titleEl.nextSibling);
+    if (environment !== 'Production') {
+        document.title = title + ' (' + environment.toUpperCase() + ')';
+    }
+    var switchUrl = String(data.switch_url || '');
+    if (switchUrl) {
+        var switchLabel = String(data.switch_label || '');
+        var envToggle = el('span', 'env-toggle');
+        envToggle.setAttribute('role', 'navigation');
+        envToggle.setAttribute('aria-label', 'Environment');
+        var currentEnv = el('span', 'active', environment);
+        currentEnv.setAttribute('aria-current', 'page');
+        var otherEnv = el('a', null, switchLabel);
+        otherEnv.setAttribute('href', switchUrl);
+        if (switchLabel === 'Production') {
+            envToggle.appendChild(otherEnv);
+            envToggle.appendChild(currentEnv);
+        } else {
+            envToggle.appendChild(currentEnv);
+            envToggle.appendChild(otherEnv);
+        }
+        envBadge.parentNode.insertBefore(envToggle, envBadge.nextSibling);
+    }
     function plural(n, unit) { return n + ' ' + unit + (n === 1 ? '' : 's') + ' ago'; }
 
     function relativeTime(ms) {
@@ -418,10 +474,16 @@ main { padding: 12px 16px; }
     }
     var chips = document.getElementById('repo-chips');
     (data.repos || []).forEach(function (r) {
-        var chip = el('span', 'chip' + (r.branch === 'main' ? '' : ' unverified'),
+        var chip = el('span', 'chip' + (r.branch !== 'branch not verified' ? '' : ' unverified'),
             r.label + ' · ' + r.script_count + ' scripts · ' + r.branch);
         chips.appendChild(chip);
     });
+    var missingRepos = Array.isArray(data.missing_repos) ? data.missing_repos : [];
+    if (missingRepos.length) {
+        var buildBranch = String(data.branch || 'main');
+        chips.appendChild(el('p', 'missing-repos', 'Not included (no ' + buildBranch +
+            ' branch): ' + missingRepos.map(String).join(', ')));
+    }
 
     var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk' };
     var navButtons = document.querySelectorAll('nav button');

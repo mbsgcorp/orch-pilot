@@ -4,6 +4,7 @@ r"""Cache a short AI summary of every SuiteScript file in one or more repos.
 Usage: python3 tools/script_map_summarize.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                              --cache FILE --command "CMD" [--max-chars N]
                                              [--limit N] [--timeout SECONDS]
+                                             [--branch NAME] [--namespace NAME]
 
 Summaries come from a local command (for example a subscription CLI such as
 Codex): --command is split like a shell would split it, then run without a
@@ -19,17 +20,24 @@ Example:
     python3 tools/script_map_summarize.py --repo RTMH=../rtmh --cache summaries.json \
         --command "codex exec --skip-git-repo-check -" --limit 50
 
-Repo arguments and branch checks follow tools/script_map.py. Files are found
-and classified the same way; each SuiteScript file is hashed (SHA-256 of its
-bytes) and only files whose hash is not already in the cache are sent to the
-command, one run per file. Entries for files no longer found in a passed repo
-are pruned; entries for repos not passed are kept. The cache is written
-atomically even when some files fail.
+Repo arguments and branch checks follow tools/script_map.py; --branch (default
+main) is the branch every repo's HEAD must name. Files are found and classified
+the same way; each SuiteScript file is hashed (SHA-256 of its bytes) and only
+files whose hash is not already in the cache under their own key are
+considered. If any other cache entry (any key, any namespace) has the same
+hash, its summary and model are copied to the file's key and counted as reused,
+with no command run; reused files do not count toward --limit or the failure
+streak. The remaining files are sent to the command, one run per file. Entries
+for files no longer found in a passed repo are pruned, within the run's
+namespace only; entries for repos not passed and entries in other namespaces
+are kept. The cache is written atomically even when some files fail.
 
-The cache is JSON: {"version": 1, "entries": {"LABEL:rel/path.js": {"sha256",
-"summary", "model", "generated_at"}}}; "model" holds the --command string.
+The cache is JSON: {"version": 1, "entries": {"[NAME|]LABEL:rel/path.js":
+{"sha256", "summary", "model", "generated_at"}}}; "model" holds the --command
+string. The "NAME|" prefix is present only when --namespace NAME is given (for
+example "sandbox|RTMH:x.js"), so prod and sandbox runs keep separate entries.
 tools/script_map.py reads it with --summaries. One line is printed:
-"script_map_summarize: C cached, N new, F failed, D deferred, P pruned -> FILE".
+"script_map_summarize: C cached, R reused, N new, F failed, D deferred, P pruned -> FILE".
 The exit code is 0 (deferred files alone do not fail a run), 2 on usage, input
 or cache errors, or 3 when any file failed.
 """
@@ -38,6 +46,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -61,6 +70,7 @@ MAX_SUMMARY = 400
 MAX_FAILURE_STREAK = 3
 MAX_STDERR = 200
 EXAMPLE_COMMAND = "codex exec --skip-git-repo-check -"
+NAMESPACE_RE = re.compile(r"[A-Za-z0-9_-]*")
 
 
 class SummaryError(Exception):
@@ -138,8 +148,8 @@ def main(argv=None):
                     "shell; the summary is read from its stdout.",
         epilog=f'example:\n  python3 tools/script_map_summarize.py --repo A=../repo '
                f'--cache summaries.json \\\n      --command "{EXAMPLE_COMMAND}" --limit 50\n\n'
-               "prints: script_map_summarize: C cached, N new, F failed, D deferred, "
-               "P pruned -> FILE\n"
+               "prints: script_map_summarize: C cached, R reused, N new, F failed, "
+               "D deferred, P pruned -> FILE\n"
                "exit codes: 0 ok (deferred files alone are ok), 2 usage/input/cache error, "
                "3 some files failed",
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -159,10 +169,21 @@ def main(argv=None):
     parser.add_argument("--timeout", type=positive_int, default=DEFAULT_TIMEOUT,
                         metavar="SECONDS",
                         help=f"seconds allowed per command run (default {DEFAULT_TIMEOUT})")
+    parser.add_argument("--branch", default="main", metavar="NAME",
+                        help="branch every repo's HEAD must name (default main)")
+    parser.add_argument("--namespace", default="", metavar="NAME",
+                        help="cache key prefix (keys become NAME|LABEL:path) so runs for "
+                             "different branches keep separate entries (default none)")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
+    if not script_map.BRANCH_RE.fullmatch(args.branch):
+        print("error: --branch must be a branch name", file=sys.stderr)
+        return 2
+    if not NAMESPACE_RE.fullmatch(args.namespace):
+        print("error: --namespace must be letters, digits, _ or -", file=sys.stderr)
+        return 2
 
     try:
         command_argv = shlex.split(args.command)
@@ -199,15 +220,15 @@ def main(argv=None):
     warnings = []
     for label, path in repos:
         try:
-            status = script_map.branch_status(path)
+            status = script_map.branch_status(path, args.branch)
         except OSError as exc:
             print(f"error: {label} cannot read {path / '.git' / 'HEAD'}: {exc.strerror}",
                   file=sys.stderr)
             return 2
         if status is None:
             warnings.append(f"warning: {label} branch not verified")
-        elif status != "main":
-            print(f"error: {label} is on {status}, not main", file=sys.stderr)
+        elif status != args.branch:
+            print(f"error: {label} is on {status}, not {args.branch}", file=sys.stderr)
             return 2
     for warning in warnings:
         print(warning, file=sys.stderr)
@@ -221,13 +242,24 @@ def main(argv=None):
         print(f"error: {args.cache} is not a valid summary cache", file=sys.stderr)
         return 2
     entries = cache["entries"]
+    ns_prefix = f"{args.namespace}|" if args.namespace else ""
 
-    cached = new = failed = deferred = not_attempted = streak = 0
+    def now():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    by_sha = {}
+    for key in sorted(entries):
+        value = entries[key]
+        if (isinstance(value, dict) and isinstance(value.get("sha256"), str)
+                and isinstance(value.get("summary"), str)):
+            by_sha.setdefault(value["sha256"], value)
+
+    cached = reused = new = failed = deferred = not_attempted = streak = 0
     found = set()
     for label, root in repos:
         walk_errors = []
         for rel, full in script_map.js_files(root, walk_errors):
-            key = f"{label}:{rel}"
+            key = f"{ns_prefix}{label}:{rel}"
             found.add(key)
             try:
                 if os.path.getsize(full) > script_map.MAX_BYTES:
@@ -247,6 +279,16 @@ def main(argv=None):
             entry = entries.get(key)
             if isinstance(entry, dict) and entry.get("sha256") == sha:
                 cached += 1
+                continue
+            source = by_sha.get(sha)
+            if source is not None:
+                entries[key] = {
+                    "sha256": sha,
+                    "summary": source["summary"],
+                    "model": source.get("model", ""),
+                    "generated_at": now(),
+                }
+                reused += 1
                 continue
             if args.limit and new >= args.limit:
                 deferred += 1
@@ -268,8 +310,9 @@ def main(argv=None):
                 "sha256": sha,
                 "summary": " ".join(reply.split())[:MAX_SUMMARY],
                 "model": args.command,
-                "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "generated_at": now(),
             }
+            by_sha.setdefault(sha, entries[key])
             new += 1
             streak = 0
         for exc in walk_errors:
@@ -285,8 +328,14 @@ def main(argv=None):
         print(f"warning: stopping after {MAX_FAILURE_STREAK} consecutive failures; "
               f"{not_attempted} files not attempted", file=sys.stderr)
 
-    prefixes = tuple(f"{label}:" for label, _ in repos)
-    stale = [key for key in entries if key.startswith(prefixes) and key not in found]
+    def in_namespace(key):
+        if ns_prefix:
+            return key.startswith(ns_prefix)
+        return "|" not in key.split(":", 1)[0]
+
+    prefixes = tuple(f"{ns_prefix}{label}:" for label, _ in repos)
+    stale = [key for key in entries
+             if in_namespace(key) and key.startswith(prefixes) and key not in found]
     for key in stale:
         del entries[key]
 
@@ -299,8 +348,8 @@ def main(argv=None):
         print(f"error: cannot write {args.cache}: {exc}", file=sys.stderr)
         return 2
 
-    print(f"script_map_summarize: {cached} cached, {new} new, {failed} failed, "
-          f"{deferred} deferred, {len(stale)} pruned -> {args.cache}")
+    print(f"script_map_summarize: {cached} cached, {reused} reused, {new} new, "
+          f"{failed} failed, {deferred} deferred, {len(stale)} pruned -> {args.cache}")
     return 3 if failed else 0
 
 

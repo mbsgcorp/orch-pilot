@@ -3,13 +3,22 @@
 
 Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    --out OUT.html [--title TEXT]
-                                   [--summaries CACHE.json]
+                                   [--summaries CACHE.json] [--refresh-url PATH]
+                                   [--branch NAME] [--environment NAME]
+                                   [--switch-url PATH --switch-label TEXT]
+                                   [--missing-repo LABEL ...]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
-file must read exactly "ref: refs/heads/main"; any other branch or a detached
-HEAD prints an error and exits 2 without writing anything. If PATH/.git is
-missing or is a file, the run proceeds with a "branch not verified" warning.
-Git itself is never invoked.
+file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
+main); any other branch or a detached HEAD prints an error and exits 2 without
+writing anything. If PATH/.git is missing or is a file, the run proceeds with a
+"branch not verified" warning. Git itself is never invoked.
+
+--environment (default Production) is shown as a badge in the page header; any
+other value is styled as a warning and added to the page title. --switch-url
+and --switch-label add a Prod | Sandbox style toggle linking to the other
+page. Each --missing-repo LABEL is listed on a "Not included (no NAME branch)"
+line under the repo chips.
 
 Every *.js file under PATH is scanned (directory symlinks are not followed;
 .git, node_modules, backup(s), temp-handoffs, test(s) and sandbox folders and
@@ -24,8 +33,9 @@ OUT. On success one summary line is printed and the exit code is 0; every
 input or branch error prints to stderr and exits 2.
 
 Each script gets a one-line summary: the cached AI summary from --summaries
-(written by tools/script_map_summarize.py) when its sha256 matches the file,
-else the description from the file's header comment, else nothing. This tool
+(written by tools/script_map_summarize.py) when the entry for "LABEL:path"
+has a sha256 matching the file, else any cache entry with a matching sha256
+(first in key order, any namespace), else the description from the file's header comment, else nothing. This tool
 only reads the cache; it never calls the network.
 """
 
@@ -135,6 +145,7 @@ CLIENT_PATH_RE = re.compile(r"\bclientScriptModulePath\s*=\s*(['\"])([^'\"]+)\1"
 TRY_RE = re.compile(r"\btry\s*\{")
 HARDCODED_ID_RE = re.compile(r"(?i)\b(?:id|internalid)\s*[:=]\s*['\"]?\d+\b")
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}([0-9a-fA-F]{24})?")
+BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]+")
 MAX_HEADER = 300
 
 
@@ -203,17 +214,18 @@ def parse_repo_arg(value):
     return label, Path(path)
 
 
-def branch_status(path):
-    """Return "main", None (not verified), or the offending branch name.
+def branch_status(path, expected="main"):
+    """Return expected, None (not verified), or the offending branch name.
 
+    expected is the branch PATH/.git/HEAD must name ("ref: refs/heads/<expected>").
     Raises OSError if PATH/.git is a directory but its HEAD cannot be read.
     """
     git = Path(path) / ".git"
     if not git.is_dir():
         return None
     head = (git / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
-    if head == "ref: refs/heads/main":
-        return "main"
+    if head == f"ref: refs/heads/{expected}":
+        return expected
     if head.startswith("ref: refs/heads/"):
         return head[len("ref: refs/heads/"):]
     if SHA_RE.fullmatch(head):
@@ -448,12 +460,19 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos, summaries=None):
+def collect(repos, summaries=None, branch="main"):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
+    branch is the branch each repo's HEAD is expected to name.
     """
     summaries = summaries or {}
+    by_sha = {}
+    for key in sorted(summaries):
+        value = summaries[key]
+        if (isinstance(value, dict) and isinstance(value.get("sha256"), str)
+                and isinstance(value.get("summary"), str)):
+            by_sha.setdefault(value["sha256"], value["summary"])
     repo_rows = []
     nodes = []
     edges = []
@@ -507,6 +526,8 @@ def collect(repos, summaries=None):
             if (isinstance(cached, dict) and cached.get("sha256") == sha
                     and isinstance(cached.get("summary"), str)):
                 summary, summary_source = cached["summary"], "ai"
+            elif sha in by_sha:
+                summary, summary_source = by_sha[sha], "ai"
             else:
                 summary = header_description(text)
                 summary_source = "header" if summary else ""
@@ -572,10 +593,10 @@ def collect(repos, summaries=None):
                 "label": records[record_id] or record_id,
                 "category": record_category(record_id),
             })
-        status = branch_status(root)
+        status = branch_status(root, branch)
         repo_rows.append({
             "label": label,
-            "branch": "main" if status == "main" else "branch not verified",
+            "branch": branch if status == branch else "branch not verified",
             "script_count": len(script_nodes),
         })
 
@@ -604,15 +625,41 @@ def main(argv=None):
                         help="summary cache written by script_map_summarize.py")
     parser.add_argument("--refresh-url", default=None, metavar="PATH",
                         help="site-relative path for the Refresh data button, e.g. /api/rebuild")
+    parser.add_argument("--branch", default="main", metavar="NAME",
+                        help="branch every repo's HEAD must name (default main)")
+    parser.add_argument("--environment", default="Production", metavar="NAME",
+                        help="environment shown in the header badge (default Production)")
+    parser.add_argument("--switch-url", default=None, metavar="PATH",
+                        help="site-relative path of the other environment's page, e.g. "
+                             "/sandbox.html")
+    parser.add_argument("--switch-label", default=None, metavar="TEXT",
+                        help="toggle label for --switch-url, e.g. Sandbox")
+    parser.add_argument("--missing-repo", action="append", default=None, metavar="LABEL",
+                        help="repo left out because it has no --branch branch; repeatable")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
-    if args.refresh_url is not None and (
-            not args.refresh_url.startswith("/")
-            or any(c.isspace() for c in args.refresh_url)):
+
+    def site_relative(value):
+        return value.startswith("/") and not any(c.isspace() for c in value)
+
+    if args.refresh_url is not None and not site_relative(args.refresh_url):
         print("error: --refresh-url must be a site-relative path starting with /",
               file=sys.stderr)
+        return 2
+    if not BRANCH_RE.fullmatch(args.branch):
+        print("error: --branch must be a branch name", file=sys.stderr)
+        return 2
+    if not args.environment.strip():
+        print("error: --environment must not be empty", file=sys.stderr)
+        return 2
+    if args.switch_url is not None and not site_relative(args.switch_url):
+        print("error: --switch-url must be a site-relative path starting with /",
+              file=sys.stderr)
+        return 2
+    if args.switch_url is not None and not args.switch_label:
+        print("error: --switch-label is required with --switch-url", file=sys.stderr)
         return 2
 
     repos = []
@@ -638,15 +685,15 @@ def main(argv=None):
     warnings = []
     for label, path in repos:
         try:
-            status = branch_status(path)
+            status = branch_status(path, args.branch)
         except OSError as exc:
             print(f"error: {label} cannot read {path / '.git' / 'HEAD'}: {exc.strerror}",
                   file=sys.stderr)
             return 2
         if status is None:
             warnings.append(f"warning: {label} branch not verified")
-        elif status != "main":
-            print(f"error: {label} is on {status}, not main", file=sys.stderr)
+        elif status != args.branch:
+            print(f"error: {label} is on {status}, not {args.branch}", file=sys.stderr)
             return 2
     for warning in warnings:
         print(warning, file=sys.stderr)
@@ -663,7 +710,7 @@ def main(argv=None):
             return 2
 
     try:
-        data = collect(repos, entries)
+        data = collect(repos, entries, args.branch)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"
@@ -675,6 +722,11 @@ def main(argv=None):
         return 2
     data["title"] = args.title
     data["refresh_url"] = args.refresh_url or ""
+    data["environment"] = args.environment
+    data["switch_url"] = args.switch_url or ""
+    data["switch_label"] = args.switch_label or ""
+    data["missing_repos"] = args.missing_repo or []
+    data["branch"] = args.branch
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         page = render(data)
