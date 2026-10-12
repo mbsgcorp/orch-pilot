@@ -215,6 +215,36 @@ main { padding: 12px 16px; }
 }
 .regen button:disabled { cursor: default; opacity: 0.6; }
 .regen-status { color: var(--muted); font-size: 12px; }
+.regen-panel {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    padding: 8px 10px;
+}
+.regen-panel select, .regen-panel input, .regen-panel textarea {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+    max-width: 100%;
+}
+.regen-panel input[hidden] { display: none; }
+.regen-panel textarea { width: 360px; min-height: 60px; }
+.regen-panel .regen-help { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.regen-panel .regen-actions { display: flex; gap: 8px; }
+.summary-history { margin-top: 4px; overflow-wrap: anywhere; word-break: break-word; }
+.summary-history summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.summary-history ol { margin: 4px 0 0; padding-left: 18px; }
+.summary-history li { margin-bottom: 4px; }
 #rec-missing { margin-bottom: 8px; }
 #rec-cards {
     display: grid;
@@ -287,6 +317,7 @@ main { padding: 12px 16px; }
     .matrix-wrap { overflow-x: auto; max-width: 100%; }
     #skipped { margin: 8px; }
     #script-search { width: 100%; }
+    .regen-panel select, .regen-panel input, .regen-panel textarea { width: 100%; box-sizing: border-box; }
 }
 </style>
 </head>
@@ -295,8 +326,6 @@ main { padding: 12px 16px; }
     <h1 id="title">Script map</h1>
     <span id="generated"></span>
     <div id="repo-chips"></div>
-    <input type="search" id="script-search" list="script-search-options" placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">
-    <datalist id="script-search-options"></datalist>
     <nav>
         <button type="button" data-view="inventory">Inventory</button>
         <button type="button" data-view="records">Records</button>
@@ -305,7 +334,9 @@ main { padding: 12px 16px; }
 </header>
 <main>
     <section id="view-inventory" class="view">
-        <div class="controls">
+        <div class="controls" id="i-controls">
+            <input type="search" id="script-search" list="script-search-options" placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">
+            <datalist id="script-search-options"></datalist>
             <select id="i-repo" aria-label="Client filter"></select>
             <select id="i-type" aria-label="Script type filter"></select>
             <select id="i-version" aria-label="Version filter"></select>
@@ -317,7 +348,7 @@ main { padding: 12px 16px; }
         <div id="i-list"></div>
     </section>
     <section id="view-records" class="view" hidden>
-        <div class="controls">
+        <div class="controls" id="rec-controls">
             <select id="rec-repo" aria-label="Client filter"></select>
         </div>
         <details id="rec-missing"><summary id="rec-missing-count"></summary><ul id="rec-missing-list"></ul></details>
@@ -329,7 +360,7 @@ main { padding: 12px 16px; }
         <div id="rec-detail"></div>
     </section>
     <section id="view-risk" class="view" hidden>
-        <div class="controls">
+        <div class="controls" id="r-controls">
             <select id="r-repo" aria-label="Repo filter"></select>
         </div>
         <div id="r-grid"></div>
@@ -447,6 +478,27 @@ main { padding: 12px 16px; }
             // Storage is unavailable, so the choice only lasts for this page view.
         }
     }
+    var AUTHOR_KEY = 'script-map-author';
+    function readAuthor() {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                var stored = window.localStorage.getItem(AUTHOR_KEY);
+                return typeof stored === 'string' ? stored.trim() : '';
+            }
+        } catch (e) {
+            // Storage is unavailable, so no name is remembered and the default is used.
+        }
+        return '';
+    }
+    function writeAuthor(name) {
+        try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+                window.localStorage.setItem(AUTHOR_KEY, String(name).trim());
+            }
+        } catch (e) {
+            // Storage is unavailable, so the name is not remembered for next time.
+        }
+    }
     var themeButton = el('button');
     themeButton.type = 'button';
     themeButton.id = 'theme-toggle';
@@ -555,6 +607,7 @@ main { padding: 12px 16px; }
     }
 
     var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk' };
+    var controlRows = { inventory: 'i-controls', records: 'rec-controls', risk: 'r-controls' };
     var navButtons = document.querySelectorAll('nav button');
     function showView(name) {
         Object.keys(views).forEach(function (k) {
@@ -563,6 +616,12 @@ main { padding: 12px 16px; }
         Array.prototype.forEach.call(navButtons, function (b) {
             b.classList.toggle('active', b.getAttribute('data-view') === name);
         });
+        // One search box: move it (not a copy) to the front of the active view's filters.
+        var row = document.getElementById(controlRows[name]);
+        var input = document.getElementById('script-search');
+        var options = document.getElementById('script-search-options');
+        row.insertBefore(options, row.firstChild);
+        row.insertBefore(input, options);
     }
     Array.prototype.forEach.call(navButtons, function (b) {
         b.addEventListener('click', function () { showView(b.getAttribute('data-view')); });
@@ -780,6 +839,8 @@ main { padding: 12px 16px; }
 
     // Pending requests from the load-time status read: summary_key -> requested-at ms.
     // Spans built before the read finishes are kept in regenSpans and filled in then.
+    var team = Array.isArray(data.team) ? data.team : [];
+    var OTHER_AUTHOR = '__other__';
     var pendingRegen = {};
     var regenSpans = [];
     var statusLoaded = false;
@@ -806,13 +867,94 @@ main { padding: 12px 16px; }
             status.textContent = text;
             button.disabled = false;
         }
+        var panel = null;
+        function closePanel() {
+            if (panel) {
+                wrap.removeChild(panel);
+                panel = null;
+            }
+        }
+        function openPanel() {
+            panel = el('div', 'regen-panel');
+            var who = el('select');
+            who.setAttribute('aria-label', 'Your name');
+            team.forEach(function (name) {
+                var opt = el('option', null, name);
+                opt.value = name;
+                who.appendChild(opt);
+            });
+            var otherOpt = el('option', null, 'Other…');
+            otherOpt.value = OTHER_AUTHOR;
+            who.appendChild(otherOpt);
+            var other = el('input');
+            other.type = 'text';
+            other.setAttribute('aria-label', 'Your name (other)');
+            other.setAttribute('maxlength', '40');
+            var guidance = el('textarea');
+            guidance.setAttribute('aria-label', 'Guidance (optional)');
+            guidance.setAttribute('maxlength', '500');
+            guidance.setAttribute('placeholder',
+                'Optional: what\'s wrong or what to focus on. Used for this run only.');
+            var actions = el('div', 'regen-actions');
+            var send = el('button', null, 'Send');
+            send.type = 'button';
+            var cancel = el('button', null, 'Cancel');
+            cancel.type = 'button';
+            actions.appendChild(send);
+            actions.appendChild(cancel);
+            panel.appendChild(who);
+            panel.appendChild(other);
+            panel.appendChild(guidance);
+            panel.appendChild(el('p', 'regen-help', 'Regenerate runs a fresh summary for this ' +
+                'script. Nightly runs and Refresh data only summarize new or changed scripts; ' +
+                'they never redo existing summaries.'));
+            panel.appendChild(actions);
+
+            function authorName() {
+                return who.value === OTHER_AUTHOR ? String(other.value || '').trim() : who.value;
+            }
+            function update() {
+                other.hidden = who.value !== OTHER_AUTHOR;
+                send.disabled = !authorName();
+            }
+            var remembered = readAuthor();
+            if (remembered && team.indexOf(remembered) !== -1) {
+                who.value = remembered;
+            } else if (remembered) {
+                who.value = OTHER_AUTHOR;
+                other.value = remembered;
+            } else {
+                who.value = team.length ? team[0] : OTHER_AUTHOR;
+            }
+            update();
+            who.addEventListener('change', update);
+            other.addEventListener('input', update);
+            cancel.addEventListener('click', closePanel);
+            send.addEventListener('click', function () {
+                var name = authorName();
+                if (!name) { return; }
+                var note = guidance.value.trim();
+                writeAuthor(name);
+                closePanel();
+                send.disabled = true;
+                button.disabled = true;
+                status.textContent = '';
+                post(name, note);
+            });
+            wrap.appendChild(panel);
+        }
         button.addEventListener('click', function () {
-            button.disabled = true;
-            status.textContent = '';
+            if (panel) {
+                closePanel();
+            } else {
+                openPanel();
+            }
+        });
+        function post(name, note) {
             fetch(refreshUrl, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ key: s.summary_key })
+                body: JSON.stringify({ key: s.summary_key, author: name, guidance: note })
             }).then(function (res) {
                 if (res.status === 202) {
                     status.textContent =
@@ -838,14 +980,56 @@ main { padding: 12px 16px; }
             }).catch(function () {
                 failed('Request failed (network error).');
             });
-        });
+        }
         return wrap;
     }
 
-    function generatedSuffix(s) {
-        var stamp = typeof s.summary_generated_at === 'string' ? s.summary_generated_at : '';
+    function stampSuffix(stamp) {
+        stamp = typeof stamp === 'string' ? stamp : '';
         if (!stamp || isNaN(Date.parse(stamp))) { return ''; }
         return ' · generated ' + stamp.slice(0, 16).replace('T', ' ') + ' UTC';
+    }
+
+    function generatedSuffix(s) { return stampSuffix(s.summary_generated_at); }
+
+    var TRIGGER_LABELS = {
+        first: 'first summary',
+        code_changed: 'updated after code change',
+        regenerate: 'regenerated',
+        reused: 'copied from identical script'
+    };
+
+    function howPart(trigger, author) {
+        if (typeof trigger !== 'string' ||
+                !Object.prototype.hasOwnProperty.call(TRIGGER_LABELS, trigger)) {
+            return '';
+        }
+        var label = TRIGGER_LABELS[trigger];
+        var who = typeof author === 'string' ? author : '';
+        if (trigger === 'regenerate' && who) { label += ' by ' + who; }
+        return ' · ' + label;
+    }
+
+    function guidanceLine(guidance) {
+        return el('div', 'kind', 'Guidance used: "' + guidance + '"');
+    }
+
+    function summaryHistory(history) {
+        var box = el('details', 'summary-history');
+        box.appendChild(el('summary', null, 'History (' + history.length + ')'));
+        var list = el('ol');
+        history.forEach(function (h) {
+            var item = el('li');
+            item.appendChild(el('div', null, typeof h.summary === 'string' ? h.summary : ''));
+            var meta = howPart(h.trigger, h.author) + stampSuffix(h.generated_at);
+            if (meta) { item.appendChild(el('div', 'kind', meta.slice(3))); }
+            if (typeof h.guidance === 'string' && h.guidance) {
+                item.appendChild(guidanceLine(h.guidance));
+            }
+            list.appendChild(item);
+        });
+        box.appendChild(list);
+        return box;
     }
 
     function scriptEntry(s) {
@@ -866,15 +1050,31 @@ main { padding: 12px 16px; }
         if (s.summary_source === 'ai' || s.summary_source === 'header') {
             about.appendChild(document.createTextNode(s.summary || ''));
             about.appendChild(el('span', 'kind',
-                s.summary_source === 'ai' ? ' · AI summary' + generatedSuffix(s) :
+                s.summary_source === 'ai' ?
+                    ' · AI summary' + howPart(s.summary_trigger, s.summary_author) +
+                        generatedSuffix(s) :
                     ' · From header comment'));
         } else {
             about.appendChild(el('span', 'empty', 'No description'));
         }
         var summaryValue = about;
+        if (s.summary_source === 'ai') {
+            var history = Array.isArray(s.summary_history) ? s.summary_history.filter(function (h) {
+                return h && typeof h === 'object';
+            }) : [];
+            var hasGuidance = typeof s.summary_guidance === 'string' && s.summary_guidance;
+            if (hasGuidance || history.length) {
+                summaryValue = el('div');
+                summaryValue.appendChild(about);
+                if (hasGuidance) { summaryValue.appendChild(guidanceLine(s.summary_guidance)); }
+                if (history.length) { summaryValue.appendChild(summaryHistory(history)); }
+            }
+        }
         if (refreshUrl) {
-            summaryValue = el('div');
-            summaryValue.appendChild(about);
+            if (summaryValue === about) {
+                summaryValue = el('div');
+                summaryValue.appendChild(about);
+            }
             summaryValue.appendChild(regenerateControl(s));
         }
         addField(dl, 'Summary', summaryValue);

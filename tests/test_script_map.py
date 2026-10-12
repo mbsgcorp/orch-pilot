@@ -1338,7 +1338,12 @@ var u = 'CUSTOMRECORD99';
                       "Refresh failed (HTTP ", "Refresh failed (network error).",
                       "Try again after", "Not included (no ",
                       "Regenerate summary", "Regeneration requested.", "Already requested at ",
-                      "Request failed (HTTP ", "Request failed (network error)."):
+                      "Request failed (HTTP ", "Request failed (network error).",
+                      "script-map-author", "Your name", "Your name (other)", "Other…",
+                      "Guidance (optional)", "Send", "Cancel", "Guidance used: ",
+                      "History (", "first summary", "updated after code change",
+                      "regenerated", "copied from identical script",
+                      "Nightly runs and Refresh data only summarize new or changed scripts"):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
@@ -1456,7 +1461,8 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(call["url"], "/api/rebuild")
         self.assertEqual(call["init"]["method"], "POST")
         self.assertEqual(call["init"]["headers"], {"content-type": "application/json"})
-        self.assertEqual(json.loads(call["init"]["body"]), {"key": "sandbox|RTMH:ue.js"})
+        self.assertEqual(json.loads(call["init"]["body"]),
+                         {"key": "sandbox|RTMH:ue.js", "author": "Kim", "guidance": ""})
         self.assertEqual(result["clicks"], [{
             "disabled_during": True,
             "status": "Regeneration requested. New summary in about 10 minutes, "
@@ -1471,7 +1477,8 @@ var u = 'CUSTOMRECORD99';
             {"status": 429, "json": {}},
             {"throw": True},
         ])
-        self.assertEqual(json.loads(result["calls"][0]["init"]["body"]), {"key": "RTMH:ue.js"})
+        self.assertEqual(json.loads(result["calls"][0]["init"]["body"]),
+                         {"key": "RTMH:ue.js", "author": "Kim", "guidance": ""})
         self.assertEqual(result["clicks"], [
             {"disabled_during": True, "disabled": False,
              "status": "Already requested at 09:58 UTC. Try again after 10:08 UTC."},
@@ -1703,11 +1710,15 @@ afterTicks(function () { console.log(JSON.stringify(statusReport())); });
         datalist = '<datalist id="script-search-options"></datalist>'
         self.assertEqual(text.count(search), 1)
         self.assertEqual(text.count(datalist), 1)
-        chips = text.index('<div id="repo-chips"></div>')
-        nav = text.index("<nav>")
-        self.assertLess(chips, text.index(search))
+        controls = text.index('<div class="controls" id="i-controls">')
+        repo = text.index('<select id="i-repo"')
+        self.assertLess(controls, text.index(search))
         self.assertLess(text.index(search), text.index(datalist))
-        self.assertLess(text.index(datalist), nav)
+        self.assertLess(text.index(datalist), repo)
+        # Nothing but whitespace between the row's opening tag, the input, the datalist
+        # and #i-repo: they are the row's first children in that order.
+        between = text[controls + len('<div class="controls" id="i-controls">'):repo]
+        self.assertEqual(between.split(), search.split() + datalist.split())
         self.assertIn("#script-search { width: 100%; }", text)
 
     def test_rendered_page_has_two_script_tags(self):
@@ -1934,6 +1945,440 @@ console.log(JSON.stringify(out));
         self.assertEqual(out["risk_empty"], ["No scripts found"])
         self.assertEqual(out["rec_chips"], ["No scripts found"])
 
+    # Search placement, Regenerate dialog, summary how/who and history
+
+    def test_template_controls_rows_have_ids(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        for row, select in (("i-controls", "i-repo"), ("rec-controls", "rec-repo"),
+                            ("r-controls", "r-repo")):
+            with self.subTest(row=row):
+                opening = '<div class="controls" id="%s">' % row
+                self.assertEqual(text.count(opening), 1)
+                self.assertLess(text.index(opening), text.index('<select id="%s"' % select))
+        self.assertEqual(text.count('<div class="controls">'), 0)
+        header = text[text.index("<header>"):text.index("</header>")]
+        self.assertNotIn("script-search", header)
+        self.assertEqual(text.count("<script"), 2)
+
+    def test_search_moves_with_views_and_keeps_text(self):
+        prelude = """
+enableQuerySelector();
+enableNav();
+['i', 'rec', 'r'].forEach(function (p) {
+    document.getElementById(p + '-controls').appendChild(document.getElementById(p + '-repo'));
+});
+"""
+        tail = """
+var input = byIdMap['script-search'];
+var options = byIdMap['script-search-options'];
+function state() {
+    var s = snapshot();
+    return {
+        rows: ['i-controls', 'rec-controls', 'r-controls'].map(function (id) {
+            return byIdMap[id].children.map(function (c) { return c.id; });
+        }),
+        hidden: ['view-inventory', 'view-records', 'view-risk'].map(function (id) {
+            return byIdMap[id].hidden;
+        }),
+        same: byIdMap['script-search'] === input && byIdMap['script-search-options'] === options,
+        listeners: input.listeners.input.length,
+        options: options.children.length,
+        value: input.value,
+        list: s.list.sort(),
+        risk: s.risk.sort(),
+        areas: s.areas.length
+    };
+}
+var out = {};
+out.start = state();
+typeSearch('req');
+navTo('records');
+out.records = state();
+navTo('risk');
+out.risk = state();
+typeSearch('hold');
+out.risk_hold = state();
+navTo('inventory');
+out.inventory = state();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_header_in_node([], tail, prelude, SEARCH_REPOS)
+        search = ["script-search", "script-search-options"]
+        self.assertEqual(out["start"]["rows"], [search + ["i-repo"], ["rec-repo"], ["r-repo"]])
+        self.assertEqual(out["start"]["hidden"], [False, True, True])
+        self.assertEqual(out["records"]["rows"],
+                         [["i-repo"], search + ["rec-repo"], ["r-repo"]])
+        self.assertEqual(out["records"]["hidden"], [True, False, True])
+        self.assertEqual(out["risk"]["rows"], [["i-repo"], ["rec-repo"], search + ["r-repo"]])
+        self.assertEqual(out["risk"]["hidden"], [True, True, False])
+        self.assertEqual(out["inventory"]["rows"], [search + ["i-repo"], ["rec-repo"], ["r-repo"]])
+        for key in ("start", "records", "risk", "risk_hold", "inventory"):
+            with self.subTest(key=key):
+                self.assertTrue(out[key]["same"])
+                self.assertEqual(out[key]["listeners"], 1)
+                self.assertEqual(out[key]["options"], 3)
+        # The typed text survives the moves and keeps filtering every view.
+        self.assertEqual(out["records"]["value"], "req")
+        self.assertEqual(out["risk"]["value"], "req")
+        self.assertEqual(out["risk"]["risk"], ["Req.Dep.js", "req_other.js"])
+        self.assertEqual(out["risk"]["list"], ["Req.Dep.js", "req_other.js"])
+        self.assertEqual(out["risk_hold"]["risk"], ["hold.js"])
+        self.assertEqual(out["inventory"]["value"], "hold")
+        self.assertEqual(out["inventory"]["list"], ["hold.js"])
+
+    PANEL_HELP = ("Regenerate runs a fresh summary for this script. Nightly runs and Refresh "
+                  "data only summarize new or changed scripts; they never redo existing "
+                  "summaries.")
+
+    def run_panel_in_node(self, tail, team=(), prelude="", reply=None, edit=None):
+        argv = ["--refresh-url", "/api/rebuild"]
+        for name in team:
+            argv += ["--team", name]
+        if edit:
+            prelude += "\neditData(function (d) { %s });" % edit
+        tail = "postFetch(%s);\nvar b = regenButton();\n" % json.dumps(
+            reply or {"status": 202}) + tail
+        return self.run_header_in_node(argv, tail, prelude)
+
+    def test_regenerate_panel_structure_open_toggle_and_cancel(self):
+        tail = """
+var out = {};
+out.closed = panelState(b);
+click(b);
+out.open = panelState(b);
+out.disabled_open = !!b.disabled;
+click(b);
+out.toggled = panelState(b);
+click(b);
+out.reopened = panelState(b) !== null;
+click(regenPanel(b).children[4].children[1]);
+out.cancelled = panelState(b);
+out.wrap_after = b.parentNode.children.length;
+out.posts = POSTS;
+console.log(JSON.stringify(out));
+"""
+        out = self.run_panel_in_node(tail, team=["Kim", "Alex"])
+        self.assertIsNone(out["closed"])
+        self.assertEqual(out["open"], {
+            "wrap": ["button.", "span.regen-status", "div.regen-panel"],
+            "tags": ["select", "input", "textarea", "p", "div"],
+            "select_label": "Your name",
+            "options": [["Alex", "Alex"], ["Kim", "Kim"], ["__other__", "Other…"]],
+            "selected": "Alex",
+            "other": {"type": "text", "label": "Your name (other)", "maxlength": "40",
+                      "hidden": True, "value": ""},
+            "guidance": {"label": "Guidance (optional)", "maxlength": "500",
+                         "placeholder": "Optional: what's wrong or what to focus on. "
+                                        "Used for this run only."},
+            "help": "p:" + self.PANEL_HELP,
+            "actions": [["button", "Send"], ["button", "Cancel"]],
+            "send_disabled": False,
+        })
+        self.assertFalse(out["disabled_open"])
+        self.assertIsNone(out["toggled"])
+        self.assertTrue(out["reopened"])
+        self.assertIsNone(out["cancelled"])
+        self.assertEqual(out["wrap_after"], 2)
+        self.assertEqual(out["posts"], [])
+
+    def test_regenerate_send_disabled_without_name_and_other_input(self):
+        tail = """
+var out = {};
+click(b);
+var p = regenPanel(b);
+var sel = p.children[0], other = p.children[1], send = p.children[4].children[0];
+function st() { return { selected: sel.value, other_hidden: !!other.hidden, send_disabled: !!send.disabled }; }
+out.team_default = st();
+sel.value = '__other__'; fire(sel, 'change');
+out.other_empty = st();
+other.value = '   '; fire(other, 'input');
+out.other_spaces = st();
+click(send);
+out.after_disabled_click = { posts: POSTS.length, open: regenPanel(b) !== null };
+other.value = ' Lee '; fire(other, 'input');
+out.other_named = st();
+sel.value = 'Kim'; fire(sel, 'change');
+out.team_again = st();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_panel_in_node(tail, team=["Kim"])
+        self.assertEqual(out["team_default"],
+                         {"selected": "Kim", "other_hidden": True, "send_disabled": False})
+        self.assertEqual(out["other_empty"],
+                         {"selected": "__other__", "other_hidden": False, "send_disabled": True})
+        self.assertEqual(out["other_spaces"],
+                         {"selected": "__other__", "other_hidden": False, "send_disabled": True})
+        self.assertEqual(out["after_disabled_click"], {"posts": 0, "open": True})
+        self.assertEqual(out["other_named"],
+                         {"selected": "__other__", "other_hidden": False, "send_disabled": False})
+        self.assertEqual(out["team_again"],
+                         {"selected": "Kim", "other_hidden": True, "send_disabled": False})
+
+    SEND_TAIL = """
+var out = {};
+click(b);
+regenerateSend(b, %s, %s);
+out.after_send = { panel: regenPanel(b), disabled: !!b.disabled,
+                   status: b.parentNode.children[1].textContent };
+afterTicks(function () {
+    out.posts = POSTS;
+    out.status = b.parentNode.children[1].textContent;
+    out.disabled = !!b.disabled;
+    out.stored = typeof STORE === 'undefined' ? null : (STORE['script-map-author'] || null);
+    console.log(JSON.stringify(out));
+});
+"""
+
+    def send(self, name, guidance, **kw):
+        return self.run_panel_in_node(
+            self.SEND_TAIL % (json.dumps(name), json.dumps(guidance)), **kw)
+
+    def test_regenerate_send_posts_team_name_and_trimmed_guidance(self):
+        out = self.send("Kim", "  Focus on\nthe holds.  ", team=["Alex", "Kim"],
+                        prelude=STORAGE_PRELUDE % "{}")
+        self.assertEqual(len(out["posts"]), 1)
+        post = out["posts"][0]
+        self.assertEqual(post["url"], "/api/rebuild")
+        self.assertEqual(post["init"]["method"], "POST")
+        self.assertEqual(post["init"]["headers"], {"content-type": "application/json"})
+        self.assertEqual(json.loads(post["init"]["body"]),
+                         {"key": "RTMH:ue.js", "author": "Kim",
+                          "guidance": "Focus on\nthe holds."})
+        self.assertEqual(out["after_send"], {"panel": None, "disabled": True, "status": ""})
+        self.assertEqual(out["status"], "Regeneration requested. New summary in about "
+                                        "10 minutes, then reload this page.")
+        self.assertTrue(out["disabled"])
+        self.assertEqual(out["stored"], "Kim")
+
+    def test_regenerate_send_posts_other_name_trimmed(self):
+        out = self.send("  Lee Ann  ", "   ", team=["Alex"], prelude=STORAGE_PRELUDE % "{}")
+        self.assertEqual(json.loads(out["posts"][0]["init"]["body"]),
+                         {"key": "RTMH:ue.js", "author": "Lee Ann", "guidance": ""})
+        self.assertEqual(out["stored"], "Lee Ann")
+
+    def test_regenerate_send_error_reenables_and_panel_reopens(self):
+        tail = """
+var out = {};
+regenerateSend(b, 'Kim', '');
+out.during = !!b.disabled;
+afterTicks(function () {
+    out.status = b.parentNode.children[1].textContent;
+    out.disabled = !!b.disabled;
+    click(b);
+    out.reopened = panelState(b);
+    console.log(JSON.stringify(out));
+});
+"""
+        out = self.run_panel_in_node(
+            tail, team=["Kim"],
+            reply={"status": 429, "json": {"requested_at": "2026-10-12T09:58:00Z"}})
+        self.assertTrue(out["during"])
+        self.assertEqual(out["status"],
+                         "Already requested at 09:58 UTC. Try again after 10:08 UTC.")
+        self.assertFalse(out["disabled"])
+        self.assertEqual(out["reopened"]["selected"], "Kim")
+        self.assertFalse(out["reopened"]["send_disabled"])
+
+    def test_regenerate_remembered_name_preselects(self):
+        tail = "click(b); console.log(JSON.stringify(panelState(b)));"
+        cases = [
+            ({"script-map-author": " Kim "}, ["Alex", "Kim"], "Kim", True, ""),
+            ({"script-map-author": "Zed"}, ["Alex", "Kim"], "__other__", False, "Zed"),
+            ({"script-map-author": "  "}, ["Alex", "Kim"], "Alex", True, ""),
+            ({}, ["Alex", "Kim"], "Alex", True, ""),
+            ({}, [], "__other__", False, ""),
+            ({"script-map-author": "Zed"}, [], "__other__", False, "Zed"),
+        ]
+        for store, team, selected, hidden, value in cases:
+            with self.subTest(store=store, team=team):
+                state = self.run_panel_in_node(tail, team=team,
+                                               prelude=STORAGE_PRELUDE % json.dumps(store))
+                self.assertEqual(state["selected"], selected)
+                self.assertEqual(state["other"]["hidden"], hidden)
+                self.assertEqual(state["other"]["value"], value)
+                self.assertEqual(state["send_disabled"], not (value or selected != "__other__"))
+
+    def test_regenerate_throwing_storage_still_works(self):
+        out = self.send("Kim", "", team=["Alex", "Kim"], prelude=THROWING_STORAGE_PRELUDE)
+        self.assertEqual(json.loads(out["posts"][0]["init"]["body"]),
+                         {"key": "RTMH:ue.js", "author": "Kim", "guidance": ""})
+        self.assertTrue(out["disabled"])
+        state = self.run_panel_in_node("click(b); console.log(JSON.stringify(panelState(b)));",
+                                       team=["Alex", "Kim"], prelude=THROWING_STORAGE_PRELUDE)
+        self.assertEqual(state["selected"], "Alex")
+
+    def test_regenerate_without_window_defaults(self):
+        state = self.run_panel_in_node("click(b); console.log(JSON.stringify(panelState(b)));",
+                                       team=["Alex"])
+        self.assertEqual(state["selected"], "Alex")
+
+    def test_regenerate_team_missing_or_invalid_is_other_only(self):
+        tail = "click(b); console.log(JSON.stringify(panelState(b)));"
+        for edit in ("delete d.team;", "d.team = 'Kim';", "d.team = null;", "d.team = [];"):
+            with self.subTest(edit=edit):
+                state = self.run_panel_in_node(tail, edit=edit)
+                self.assertEqual(state["options"], [["__other__", "Other…"]])
+                self.assertEqual(state["selected"], "__other__")
+                self.assertFalse(state["other"]["hidden"])
+                self.assertTrue(state["send_disabled"])
+
+    def test_regenerate_regenerate_shim_with_team_name(self):
+        # The shared regenerate() helper picks a team option when the name is listed.
+        result = self.run_header_in_node(
+            ["--refresh-url", "/api/rebuild", "--team", "Kim"],
+            "regenerate([{\"status\": 202}], 'Kim', ' x ');")
+        self.assertEqual(json.loads(result["calls"][0]["init"]["body"]),
+                         {"key": "RTMH:ue.js", "author": "Kim", "guidance": "x"})
+
+    HOW_TAIL = "console.log(JSON.stringify(summaryLabels()));"
+
+    def test_ai_summary_how_part_labels(self):
+        names = ("a.js", "b.js", "c.js", "d.js", "e.js", "f.js", "g.js", "h.js", "i.js", "j.js")
+        repos = {"RTMH": {n: USER_EVENT for n in names}}
+        stamp = "2026-03-04T05:06:07Z"
+        values = {
+            "a.js": ["ai", "first", "", stamp],
+            "b.js": ["ai", "code_changed", "", stamp],
+            "c.js": ["ai", "regenerate", "Kim", stamp],
+            "d.js": ["ai", "regenerate", "", stamp],
+            "e.js": ["ai", "reused", "", stamp],
+            "f.js": ["ai", "weird", "Kim", stamp],
+            "g.js": ["ai", "", "", stamp],
+            "h.js": ["ai", "first", "Kim", ""],
+            "i.js": ["header", "regenerate", "Kim", stamp],
+            "j.js": ["ai", "regenerate", "Lee Ann", "not a date"],
+        }
+        prelude = ("editData(function (d) { var v = %s; d.nodes.forEach(function (n) {"
+                   " if (v[n.name]) { n.summary = 'Text.'; n.summary_source = v[n.name][0];"
+                   " n.summary_trigger = v[n.name][1]; n.summary_author = v[n.name][2];"
+                   " n.summary_generated_at = v[n.name][3]; } }); });" % json.dumps(values))
+        labels = self.run_header_in_node([], self.HOW_TAIL, prelude, repos)
+        gen = " · generated 2026-03-04 05:06 UTC"
+        self.assertEqual(labels, {
+            "a.js": [" · AI summary · first summary" + gen],
+            "b.js": [" · AI summary · updated after code change" + gen],
+            "c.js": [" · AI summary · regenerated by Kim" + gen],
+            "d.js": [" · AI summary · regenerated" + gen],
+            "e.js": [" · AI summary · copied from identical script" + gen],
+            "f.js": [" · AI summary" + gen],
+            "g.js": [" · AI summary" + gen],
+            "h.js": [" · AI summary · first summary"],
+            "i.js": [" · From header comment"],
+            "j.js": [" · AI summary · regenerated by Lee Ann"],
+        })
+
+    def test_ai_summary_how_part_via_cache(self):
+        sha = hashlib.sha256(USER_EVENT.encode("utf-8")).hexdigest()
+        cache = self.write_cache({"RTMH:ai.js": dict(
+            self.summary_entry(sha, "Holds."), generated_at="2026-01-02T03:04:05Z",
+            trigger="regenerate", author="Kim", guidance="Mention holds.")})
+        labels = self.run_header_in_node(
+            ["--summaries", str(cache)], self.HOW_TAIL, "", {"RTMH": {"ai.js": USER_EVENT}})
+        self.assertEqual(labels, {
+            "ai.js": [" · AI summary · regenerated by Kim · generated 2026-01-02 03:04 UTC"]})
+
+    def run_extras(self, values, argv=()):
+        repos = {"RTMH": {n: USER_EVENT for n in values}}
+        prelude = ("editData(function (d) { var v = %s; d.nodes.forEach(function (n) {"
+                   " if (v[n.name]) { Object.keys(v[n.name]).forEach(function (k) {"
+                   " n[k] = v[n.name][k]; }); } }); });" % json.dumps(values))
+        return self.run_header_in_node(
+            list(argv), "console.log(JSON.stringify(summaryExtras()));", prelude, repos)
+
+    def test_guidance_line(self):
+        base = {"summary": "Text.", "summary_source": "ai", "summary_trigger": "regenerate",
+                "summary_author": "Kim", "summary_history": []}
+        out = self.run_extras({
+            "a.js": dict(base, summary_guidance="Mention <b>holds</b> & \"quotes\"."),
+            "b.js": dict(base, summary_guidance=""),
+            "c.js": dict(base, summary_source="header", summary_guidance="Ignored."),
+        })
+        self.assertEqual(out["a.js"]["order"], ["span", "div.kind"])
+        self.assertEqual(out["a.js"]["guidance"],
+                         ['Guidance used: "Mention <b>holds</b> & "quotes"."'])
+        self.assertIsNone(out["a.js"]["history"])
+        self.assertEqual(out["b.js"]["order"], ["span"])
+        self.assertEqual(out["b.js"]["guidance"], [])
+        self.assertEqual(out["c.js"]["order"], ["span"])
+
+    def test_guidance_and_history_sit_above_regenerate(self):
+        out = self.run_extras({"a.js": {
+            "summary": "Text.", "summary_source": "ai", "summary_guidance": "G.",
+            "summary_history": [{"summary": "Old.", "generated_at": "", "trigger": "first",
+                                 "author": "", "guidance": ""}]}},
+            argv=["--refresh-url", "/api/rebuild"])
+        self.assertEqual(out["a.js"]["order"],
+                         ["span", "div.kind", "details.summary-history", "div.regen"])
+
+    def test_summary_history_section(self):
+        history = [
+            {"summary": "Newest.", "generated_at": "2026-02-01T10:20:30Z",
+             "trigger": "regenerate", "author": "Kim", "guidance": "Mention holds."},
+            {"summary": "Middle.", "generated_at": "2026-01-15T08:00:00Z",
+             "trigger": "", "author": "", "guidance": ""},
+            {"summary": "Older.", "generated_at": "not a date",
+             "trigger": "code_changed", "author": "", "guidance": ""},
+            {"summary": "Bare.", "generated_at": "", "trigger": "", "author": "",
+             "guidance": ""},
+            {"summary": "Oldest.", "generated_at": "", "trigger": "regenerate",
+             "author": "", "guidance": "x" * 500},
+        ]
+        out = self.run_extras({
+            "a.js": {"summary": "Now.", "summary_source": "ai", "summary_trigger": "first",
+                     "summary_history": history},
+            "b.js": {"summary": "Now.", "summary_source": "ai", "summary_history": []},
+            "c.js": {"summary": "Now.", "summary_source": "ai", "summary_history": "bad"},
+        })
+        self.assertEqual(out["a.js"]["order"], ["span", "details.summary-history"])
+        self.assertEqual(out["a.js"]["history"], {
+            "tag": "details",
+            "open": False,
+            "summary": "summary:History (5)",
+            "items": [
+                [["", "Newest."],
+                 ["kind", "regenerated by Kim · generated 2026-02-01 10:20 UTC"],
+                 ["kind", 'Guidance used: "Mention holds."']],
+                [["", "Middle."], ["kind", "generated 2026-01-15 08:00 UTC"]],
+                [["", "Older."], ["kind", "updated after code change"]],
+                [["", "Bare."]],
+                [["", "Oldest."], ["kind", "regenerated"],
+                 ["kind", 'Guidance used: "' + "x" * 500 + '"']],
+            ],
+        })
+        for name in ("b.js", "c.js"):
+            with self.subTest(name=name):
+                self.assertIsNone(out[name]["history"])
+                self.assertEqual(out[name]["order"], ["span"])
+
+    def test_template_panel_and_history_css(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        media = text[text.index("@media (max-width: 600px) {"):]
+        media = media[:media.index("\n}\n")]
+        self.assertIn(".regen-panel select, .regen-panel input, .regen-panel textarea "
+                      "{ width: 100%; box-sizing: border-box; }", media)
+        panel = self.css_rule(text, ".regen-panel")
+        self.assertEqual(panel["border"], "1px solid var(--border)")
+        self.assertEqual(panel["max-width"], "100%")
+        fields = self.css_rule(text, ".regen-panel select, .regen-panel input, "
+                                     ".regen-panel textarea")
+        self.assertEqual(fields["max-width"], "100%")
+        self.assertEqual(fields["color"], "var(--text)")
+        history = self.css_rule(text, ".summary-history")
+        self.assertEqual(history["overflow-wrap"], "anywhere")
+        self.assertEqual(history["word-break"], "break-word")
+        # New rules use only the palette variables, so both themes apply.
+        for selector in (".regen-panel", ".regen-panel select, .regen-panel input, "
+                         ".regen-panel textarea", ".summary-history"):
+            for value in self.css_rule(text, selector).values():
+                self.assertNotRegex(value, r"#[0-9a-fA-F]{3,6}\b")
+
+    def test_template_has_no_unsafe_dom_writes(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.assertEqual(text.count("<script"), 2)
+        for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(",
+                    "http://", "https://", "querySelector('#script-search"):
+            self.assertNotIn(bad, text)
+
 
 DOM_SHIM = r"""
 function Elem(tag) {
@@ -2039,7 +2484,35 @@ function walk(root, pred, out) {
     return out;
 }
 
-function regenerate(replies) {
+// Fire every listener of one event type on a shim element.
+function fire(target, type) {
+    ((target.listeners || {})[type] || []).forEach(function (fn) { fn({}); });
+}
+
+function regenPanel(button) {
+    var p = button.parentNode.children[2];
+    return p && p.className === 'regen-panel' ? p : null;
+}
+
+// Open the panel, make sure `name` is the effective author (choosing the team option
+// when present, else Other… plus typed text), fill in `guidance` and click Send.
+function regenerateSend(button, name, guidance) {
+    if (!regenPanel(button)) { click(button); }
+    var panel = regenPanel(button);
+    var select = panel.children[0];
+    var hasTeam = select.children.some(function (o) { return o.value === name; });
+    select.value = hasTeam ? name : '__other__';
+    fire(select, 'change');
+    if (!hasTeam) {
+        panel.children[1].value = name;
+        fire(panel.children[1], 'input');
+    }
+    panel.children[2].value = guidance || '';
+    click(panel.children[4].children[0]);
+}
+
+function regenerate(replies, name, guidance) {
+    name = name === undefined ? 'Kim' : name;
     var list = byIdMap['i-list'];
     var entries = walk(list, function (c) { return c.tagName === 'details'; });
     var buttons = walk(list, function (c) {
@@ -2069,7 +2542,7 @@ function regenerate(replies) {
                 });
             };
             button.disabled = false;
-            button.listeners.click.forEach(function (fn) { fn({}); });
+            regenerateSend(button, name, guidance);
             var during = button.disabled;
             for (var k = 0; k < 5; k++) { await tick(); }
             clicks.push({ disabled_during: during, status: status.textContent,
@@ -2170,6 +2643,89 @@ function statusReport() {
     var rs = walk(header, function (c) { return c.id === 'refresh-status'; })[0];
     return { calls: STATUS_CALLS, refresh_status: rs ? rs.textContent : null,
              inventory: regenStatuses('i-list') };
+}
+
+// Nav buttons for view switching: document.querySelectorAll('nav button') returns them.
+var NAV = [];
+function enableNav() {
+    NAV = ['inventory', 'records', 'risk'].map(function (v) {
+        var b = new Elem('button'); b.setAttribute('data-view', v); return b;
+    });
+    document.querySelectorAll = function (sel) { return sel === 'nav button' ? NAV : []; };
+}
+function navTo(view) {
+    click(NAV.filter(function (b) { return b.getAttribute('data-view') === view; })[0]);
+}
+
+// Fake fetch for Regenerate POSTs, installed after load: records calls, answers `reply`.
+var POSTS = [];
+function postFetch(reply) {
+    fetch = function (url, init) {
+        POSTS.push({ url: url, init: init });
+        if (reply['throw']) { return Promise.reject(new Error('offline')); }
+        return Promise.resolve({ status: reply.status, json: function () {
+            return Promise.resolve(reply.json);
+        } });
+    };
+}
+
+function regenButton(id) {
+    return walk(byIdMap[id || 'i-list'], function (c) {
+        return c.tagName === 'button' && c.textContent === 'Regenerate summary';
+    })[0] || null;
+}
+
+function panelState(button) {
+    var p = regenPanel(button);
+    if (!p) { return null; }
+    var sel = p.children[0], other = p.children[1], g = p.children[2];
+    var help = p.children[3], actions = p.children[4];
+    return {
+        wrap: button.parentNode.children.map(function (c) { return c.tagName + '.' + c.className; }),
+        tags: p.children.map(function (c) { return c.tagName; }),
+        select_label: sel.getAttribute('aria-label'),
+        options: sel.children.map(function (o) { return [o.value, o.textContent]; }),
+        selected: sel.value,
+        other: { type: other.type, label: other.getAttribute('aria-label'),
+                 maxlength: other.getAttribute('maxlength'), hidden: !!other.hidden,
+                 value: other.value },
+        guidance: { label: g.getAttribute('aria-label'), maxlength: g.getAttribute('maxlength'),
+                    placeholder: g.getAttribute('placeholder') },
+        help: help.tagName + ':' + help.textContent,
+        actions: actions.children.map(function (c) { return [c.type, c.textContent]; }),
+        send_disabled: !!actions.children[0].disabled
+    };
+}
+
+function scriptEntries(id) {
+    return walk(byIdMap[id || 'i-list'], function (c) {
+        return c.tagName === 'details' && c.getAttribute('data-id') !== null;
+    });
+}
+
+// What follows the summary text: guidance line(s) and the history section.
+function summaryExtras(id) {
+    var out = {};
+    scriptEntries(id).forEach(function (d) {
+        var dl = walk(d, function (c) { return c.tagName === 'dl'; })[0];
+        var value = dl.children[1].children[0];
+        var top = value.tagName === 'div' ? value.children : [value];
+        var hist = top.filter(function (c) { return c.className === 'summary-history'; })[0];
+        out[entryName(d)] = {
+            order: top.map(function (c) { return c.tagName + (c.className ? '.' + c.className : ''); }),
+            guidance: top.filter(function (c) { return c.className === 'kind'; })
+                .map(function (c) { return c.textContent; }),
+            history: hist ? {
+                tag: hist.tagName,
+                open: !!hist.open,
+                summary: hist.children[0].tagName + ':' + hist.children[0].textContent,
+                items: hist.children[1].children.map(function (li) {
+                    return li.children.map(function (c) { return [c.className, c.textContent]; });
+                })
+            } : null
+        };
+    });
+    return out;
 }
 
 function themeButton() {
