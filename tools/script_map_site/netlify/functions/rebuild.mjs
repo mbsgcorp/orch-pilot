@@ -6,6 +6,10 @@
 // "regenerate summary" request in RESUMMARIZE_PATH on the same branch, as
 // {"version": 1, "requests": {"<key>": "<iso>"}}, limited to one per key per 10
 // minutes. Entries older than 7 days are dropped and at most 500 are kept.
+//
+// A GET reads both files (no writes) and returns {"status": "ok",
+// "rebuild_requested_at": <iso or null>, "requests": {"<key>": "<iso>"}} with
+// cache-control: no-store, so the page can show which requests are still pending.
 
 export const config = { path: "/api/rebuild" };
 
@@ -14,10 +18,10 @@ const MAX_REQUEST_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_REQUESTS = 500;
 const KEY_RE = /^(?:[A-Za-z0-9_-]+\|)?[^|:\r\n]{1,100}:[^\r\n]{1,300}$/;
 
-function json(status, obj) {
+function json(status, obj, extraHeaders = {}) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...extraHeaders },
   });
 }
 
@@ -26,6 +30,9 @@ function nowIso() {
 }
 
 export default async (req) => {
+  if (req.method === "GET") {
+    return readStatus();
+  }
   if (req.method !== "POST") {
     return json(405, { status: "method_not_allowed" });
   }
@@ -179,6 +186,72 @@ async function requestResummarize(key, { token, branch, headers, url }) {
       return json(202, { status: "requested", key, requested_at: iso });
     }
     return json(502, { status: "error", error: "github " + putRes.status });
+  } catch (err) {
+    const message = String((err && err.message) || err).split(token).join("***");
+    return json(502, { status: "error", error: "github " + message });
+  }
+}
+
+async function readStatus() {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.REBUILD_REPO;
+  const branch = process.env.REBUILD_BRANCH || "rebuild-requests";
+  const path = process.env.REBUILD_PATH || "rebuild-request.json";
+  const resummarizePath = process.env.RESUMMARIZE_PATH || "resummarize-requests.json";
+  if (!token || !repo) {
+    return json(500, { status: "error", error: "not configured" });
+  }
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "mbsg-script-map",
+  };
+
+  // Returns { file } (parsed content, or null if missing/unparseable) or { error }.
+  async function readFile(filePath) {
+    const url = `https://api.github.com/repos/${repo}/contents/${filePath}`;
+    const res = await fetch(url + "?ref=" + encodeURIComponent(branch), { method: "GET", headers });
+    if (res.status === 404) {
+      return { file: null };
+    }
+    if (res.status !== 200) {
+      return { error: "github " + res.status };
+    }
+    const body = await res.json();
+    try {
+      return { file: JSON.parse(Buffer.from(body.content, "base64").toString("utf8")) };
+    } catch {
+      return { file: null };
+    }
+  }
+
+  try {
+    const rebuild = await readFile(path);
+    if (rebuild.error) {
+      return json(502, { status: "error", error: rebuild.error });
+    }
+    const resummarize = await readFile(resummarizePath);
+    if (resummarize.error) {
+      return json(502, { status: "error", error: resummarize.error });
+    }
+
+    const prior = rebuild.file;
+    const rebuildRequestedAt = prior && typeof prior === "object" &&
+      typeof prior.requested_at === "string" ? prior.requested_at : null;
+    const priorRequests = resummarize.file && typeof resummarize.file === "object"
+      ? resummarize.file.requests : null;
+    const requests = {};
+    if (priorRequests && typeof priorRequests === "object" && !Array.isArray(priorRequests)) {
+      for (const k of Object.keys(priorRequests)) {
+        if (typeof priorRequests[k] === "string") {
+          requests[k] = priorRequests[k];
+        }
+      }
+    }
+    return json(200, { status: "ok", rebuild_requested_at: rebuildRequestedAt, requests },
+      { "cache-control": "no-store" });
   } catch (err) {
     const message = String((err && err.message) || err).split(token).join("***");
     return json(502, { status: "error", error: "github " + message });

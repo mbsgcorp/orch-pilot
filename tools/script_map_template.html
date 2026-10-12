@@ -778,6 +778,17 @@ main { padding: 12px 16px; }
         return ul;
     }
 
+    // Pending requests from the load-time status read: summary_key -> requested-at ms.
+    // Spans built before the read finishes are kept in regenSpans and filled in then.
+    var pendingRegen = {};
+    var regenSpans = [];
+    var statusLoaded = false;
+
+    function regenPendingText(ms) {
+        return 'Regeneration requested at ' + hhmm(ms) +
+            ' UTC. New summary usually within 10 minutes; reload to check.';
+    }
+
     function regenerateControl(s) {
         var wrap = el('div', 'regen');
         var button = el('button', null, 'Regenerate summary');
@@ -786,6 +797,11 @@ main { padding: 12px 16px; }
         status.setAttribute('role', 'status');
         wrap.appendChild(button);
         wrap.appendChild(status);
+        if (Object.prototype.hasOwnProperty.call(pendingRegen, s.summary_key)) {
+            status.textContent = regenPendingText(pendingRegen[s.summary_key]);
+        } else if (!statusLoaded) {
+            regenSpans.push({ key: s.summary_key, span: status });
+        }
         function failed(text) {
             status.textContent = text;
             button.disabled = false;
@@ -826,6 +842,12 @@ main { padding: 12px 16px; }
         return wrap;
     }
 
+    function generatedSuffix(s) {
+        var stamp = typeof s.summary_generated_at === 'string' ? s.summary_generated_at : '';
+        if (!stamp || isNaN(Date.parse(stamp))) { return ''; }
+        return ' · generated ' + stamp.slice(0, 16).replace('T', ' ') + ' UTC';
+    }
+
     function scriptEntry(s) {
         var details = el('details');
         details.setAttribute('data-id', s.id);
@@ -844,7 +866,8 @@ main { padding: 12px 16px; }
         if (s.summary_source === 'ai' || s.summary_source === 'header') {
             about.appendChild(document.createTextNode(s.summary || ''));
             about.appendChild(el('span', 'kind',
-                s.summary_source === 'ai' ? ' · AI summary' : ' · From header comment'));
+                s.summary_source === 'ai' ? ' · AI summary' + generatedSuffix(s) :
+                    ' · From header comment'));
         } else {
             about.appendChild(el('span', 'empty', 'No description'));
         }
@@ -1236,10 +1259,65 @@ main { padding: 12px 16px; }
         skippedBody.appendChild(table);
     }
 
+    // Pending-request status: read once per load. Pending means requested after this
+    // page was built (data.generated_at).
+    function applyStatus(body) {
+        var built = Date.parse(String(data.generated_at || ''));
+        if (isNaN(built)) { return; }
+        var rebuildAt = typeof body.rebuild_requested_at === 'string' ?
+            Date.parse(body.rebuild_requested_at) : NaN;
+        if (!isNaN(rebuildAt) && rebuildAt > built) {
+            refreshStatus.textContent = 'Refresh requested at ' + hhmm(rebuildAt) +
+                ' UTC. New data usually within 10 minutes; reload to check.';
+        }
+        var requests = body.requests;
+        if (!requests || typeof requests !== 'object' || Array.isArray(requests)) { return; }
+        Object.keys(requests).forEach(function (key) {
+            var when = typeof requests[key] === 'string' ? Date.parse(requests[key]) : NaN;
+            if (!isNaN(when) && when > built) { pendingRegen[key] = when; }
+        });
+        regenSpans.forEach(function (r) {
+            if (Object.prototype.hasOwnProperty.call(pendingRegen, r.key) && !r.span.textContent) {
+                r.span.textContent = regenPendingText(pendingRegen[r.key]);
+            }
+        });
+    }
+
+    function loadStatus() {
+        function unavailable() {
+            statusLoaded = true;
+            regenSpans = [];
+            refreshStatus.textContent = 'Status unavailable.';
+        }
+        var request;
+        try {
+            request = fetch(refreshUrl, { method: 'GET', cache: 'no-store' });
+        } catch (err) {
+            unavailable();
+            return;
+        }
+        Promise.resolve(request).then(function (res) {
+            if (!res || res.status !== 200) {
+                unavailable();
+                return;
+            }
+            return res.json().then(function (body) {
+                if (!body || typeof body !== 'object' || Array.isArray(body)) {
+                    unavailable();
+                    return;
+                }
+                statusLoaded = true;
+                applyStatus(body);
+                regenSpans = [];
+            }, unavailable);
+        }, unavailable).catch(unavailable);
+    }
+
     showView('inventory');
     renderInventory();
     renderRecords();
     renderRisk();
+    if (refreshUrl) { loadStatus(); }
 }());
 </script>
 </body>
