@@ -481,7 +481,7 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
         value = summaries[key]
         if (isinstance(value, dict) and isinstance(value.get("sha256"), str)
                 and isinstance(value.get("summary"), str)):
-            by_sha.setdefault(value["sha256"], value["summary"])
+            by_sha.setdefault(value["sha256"], value)
     repo_rows = []
     nodes = []
     edges = []
@@ -532,11 +532,14 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
         for rel, text, script_type, api_version, sha in scripts:
             node_id = f"{label}:{rel}"
             cached = summaries.get(node_id)
-            if (isinstance(cached, dict) and cached.get("sha256") == sha
+            if not (isinstance(cached, dict) and cached.get("sha256") == sha
                     and isinstance(cached.get("summary"), str)):
+                cached = by_sha.get(sha)
+            summary_generated_at = ""
+            if cached is not None:
                 summary, summary_source = cached["summary"], "ai"
-            elif sha in by_sha:
-                summary, summary_source = by_sha[sha], "ai"
+                if isinstance(cached.get("generated_at"), str):
+                    summary_generated_at = cached["generated_at"]
             else:
                 summary = header_description(text)
                 summary_source = "header" if summary else ""
@@ -590,6 +593,7 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 "risk": risk(text, len(set(deploy_ids) | set(touches))),
                 "summary": summary,
                 "summary_source": summary_source,
+                "summary_generated_at": summary_generated_at,
                 "summary_key": f"{key_prefix}{node_id}",
             })
 

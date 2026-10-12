@@ -971,6 +971,64 @@ var u = 'CUSTOMRECORD99';
         node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
         self.assertEqual((node["summary"], node["summary_source"]), ("Own key.", "ai"))
 
+    def test_summary_generated_at_own_key(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {"0:other.js": dict(self.summary_entry(sha, "Other."),
+                                      generated_at="2025-05-05T05:05:05Z"),
+                   "A:ai.js": dict(self.summary_entry(sha, "Own."),
+                                   generated_at="2026-02-03T04:05:06Z")}
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual((node["summary"], node["summary_source"], node["summary_generated_at"]),
+                         ("Own.", "ai", "2026-02-03T04:05:06Z"))
+
+    def test_summary_generated_at_from_sha_fallback_entry(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        entries = {
+            "sandbox|A:ai.js": dict(self.summary_entry(sha, "Later key."),
+                                    generated_at="2026-09-09T09:09:09Z"),
+            "C:x.js": dict(self.summary_entry(sha, "First key."),
+                           generated_at="2026-03-03T03:03:03Z"),
+            "A:ai.js": dict(self.summary_entry("0" * 64, "Stale own key."),
+                            generated_at="2026-12-12T12:12:12Z"),
+        }
+        node = self.scripts(script_map.collect([("A", repo)], entries))["ai.js"]
+        self.assertEqual((node["summary"], node["summary_generated_at"]),
+                         ("First key.", "2026-03-03T03:03:03Z"))
+
+    def test_summary_generated_at_missing_or_not_string(self):
+        repo = self.make_repo("a")
+        ai = self.write("a/ai.js", USER_EVENT)
+        sha = hashlib.sha256(ai.read_bytes()).hexdigest()
+        for key in ("A:ai.js", "B:ai.js"):
+            for value in (None, 5, ["2026-01-01T00:00:00Z"], "missing"):
+                with self.subTest(key=key, value=value):
+                    entry = {"sha256": sha, "summary": "S.", "model": "m"}
+                    if value != "missing":
+                        entry["generated_at"] = value
+                    node = self.scripts(script_map.collect([("A", repo)], {key: entry}))["ai.js"]
+                    self.assertEqual((node["summary_source"], node["summary_generated_at"]),
+                                     ("ai", ""))
+
+    def test_summary_generated_at_empty_for_header_and_empty(self):
+        repo = self.make_repo("a")
+        self.write("a/stale.js", USER_EVENT.replace("/**\n", "/**\n * Header text.\n"))
+        self.write("a/none.js", USER_EVENT)
+        entries = {"A:stale.js": self.summary_entry("0" * 64, "Old."),
+                   "A:none.js": self.summary_entry("0" * 64, "Old.")}
+        nodes = self.scripts(script_map.collect([("A", repo)], entries))
+        self.assertEqual((nodes["stale.js"]["summary_source"],
+                          nodes["stale.js"]["summary_generated_at"]), ("header", ""))
+        self.assertEqual((nodes["none.js"]["summary_source"],
+                          nodes["none.js"]["summary_generated_at"]), ("", ""))
+        self.assertEqual(sorted(nodes["none.js"]), sorted([
+            "id", "kind", "repo", "path", "name", "type", "type_inferred", "api_version",
+            "version", "entry_points", "modules", "has_deploy_line", "risk", "summary",
+            "summary_source", "summary_generated_at", "summary_key"]))
+
     def test_summaries_sha_fallback_via_cli(self):
         repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
         ai = self.write("a/ai.js", USER_EVENT)
@@ -1230,6 +1288,179 @@ var u = 'CUSTOMRECORD99';
             {"disabled_during": True, "disabled": False,
              "status": "Request failed (network error)."},
         ])
+
+    # Summary generated time and pending request status
+
+    def test_ai_summary_generated_suffix(self):
+        repos = {"RTMH": {n: USER_EVENT for n in ("a.js", "b.js", "c.js", "d.js", "e.js")}}
+        values = {"a.js": ["ai", "2026-03-04T05:06:07Z"], "b.js": ["ai", ""],
+                  "c.js": ["ai", "not a date"], "d.js": ["header", "2026-03-04T05:06:07Z"],
+                  "e.js": ["ai", "2026-03-04T05:06:07.123+00:00"]}
+        prelude = ("editData(function (d) { var v = %s; d.nodes.forEach(function (n) {"
+                   " if (v[n.name]) { n.summary = 'Text.'; n.summary_source = v[n.name][0];"
+                   " n.summary_generated_at = v[n.name][1]; } }); });" % json.dumps(values))
+        labels = self.run_header_in_node(
+            [], "console.log(JSON.stringify(summaryLabels()));", prelude, repos)
+        self.assertEqual(labels, {
+            "a.js": [" · AI summary · generated 2026-03-04 05:06 UTC"],
+            "b.js": [" · AI summary"],
+            "c.js": [" · AI summary"],
+            "d.js": [" · From header comment"],
+            "e.js": [" · AI summary · generated 2026-03-04 05:06 UTC"],
+        })
+
+    def test_ai_summary_generated_suffix_via_cache(self):
+        sources = {"ai.js": USER_EVENT, "hdr.js": USER_EVENT.replace("/**\n", "/**\n * Hdr.\n")}
+        sha = hashlib.sha256(USER_EVENT.encode("utf-8")).hexdigest()
+        cache = self.write_cache({"RTMH:ai.js": dict(self.summary_entry(sha, "Holds."),
+                                                     generated_at="2026-01-02T03:04:05Z")})
+        labels = self.run_header_in_node(
+            ["--summaries", str(cache)], "console.log(JSON.stringify(summaryLabels()));",
+            "", {"RTMH": sources})
+        self.assertEqual(labels, {"ai.js": [" · AI summary · generated 2026-01-02 03:04 UTC"],
+                                  "hdr.js": [" · From header comment"]})
+
+    STATUS_TAIL = "afterTicks(function () { console.log(JSON.stringify(statusReport())); });"
+
+    def run_status_in_node(self, reply, argv=("--refresh-url", "/api/rebuild"),
+                           generated_at="2026-10-12T10:00:00Z", tail=STATUS_TAIL):
+        prelude = "enableQuerySelector();\n"
+        if generated_at is None:
+            prelude += "editData(function (d) { delete d.generated_at; });\n"
+        else:
+            prelude += "editData(function (d) { d.generated_at = %s; });\n" % json.dumps(
+                generated_at)
+        if reply is not None:
+            prelude += "statusFetch(%s);\n" % json.dumps(reply)
+        return self.run_header_in_node(list(argv), tail, prelude, SEARCH_REPOS)
+
+    def test_status_get_sent_once_with_refresh_url(self):
+        out = self.run_status_in_node({"status": 200, "json": {
+            "status": "ok", "rebuild_requested_at": None, "requests": {}}})
+        self.assertEqual(out["calls"], [
+            {"url": "/api/rebuild", "init": {"method": "GET", "cache": "no-store"}}])
+        self.assertEqual(out["refresh_status"], "")
+        self.assertEqual({v["status"] for v in out["inventory"].values()}, {""})
+
+    def test_status_get_not_sent_without_refresh_url(self):
+        out = self.run_status_in_node({"status": 200, "json": {}}, argv=())
+        self.assertEqual(out["calls"], [])
+        self.assertIsNone(out["refresh_status"])
+        self.assertEqual(set(out["inventory"].values()), {None})
+
+    def test_status_refresh_pending_message(self):
+        cases = {
+            "2026-10-12T10:07:00Z": "Refresh requested at 10:07 UTC. New data usually within "
+                                    "10 minutes; reload to check.",
+            "2026-10-12T10:00:00Z": "",
+            "2026-10-12T09:59:59Z": "",
+            None: "",
+            "not a date": "",
+            5: "",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                out = self.run_status_in_node({"status": 200, "json": {
+                    "status": "ok", "rebuild_requested_at": value, "requests": {}}})
+                self.assertEqual(out["refresh_status"], expected)
+
+    def test_status_regenerate_pending_in_inventory_and_records(self):
+        later = "2026-10-12T10:05:00Z"
+        reply = {"status": 200, "json": {"status": "ok", "rebuild_requested_at": None,
+                 "requests": {
+                     "RTMH:Req.Dep.js": later,
+                     "WCS:hold.js": "2026-10-12T10:00:00Z",
+                     "RTMH:req_other.js": "2026-10-12T09:00:00Z",
+                     "sandbox|WCS:hold.js": later,
+                     "X:unknown.js": later,
+                 }}}
+        tail = """
+afterTicks(function () {
+    var out = {};
+    out.load = statusReport();
+    click(areaCard('Custom records'));
+    out.records = regenStatuses('rec-list');
+    typeSearch('req');
+    out.searched = regenStatuses('i-list');
+    out.searched_records = regenStatuses('rec-list');
+    typeSearch('');
+    out.cleared = regenStatuses('i-list');
+    console.log(JSON.stringify(out));
+});
+"""
+        out = self.run_status_in_node(reply, tail=tail)
+        pending = ("Regeneration requested at 10:05 UTC. New summary usually within "
+                   "10 minutes; reload to check.")
+        idle = {"status": "", "disabled": False, "status_is_second": True}
+        busy = {"status": pending, "disabled": False, "status_is_second": True}
+        self.assertEqual(out["load"]["refresh_status"], "")
+        self.assertEqual(out["load"]["inventory"],
+                         {"Req.Dep.js": busy, "hold.js": idle, "req_other.js": idle})
+        self.assertEqual(out["records"], {"Req.Dep.js": busy, "hold.js": idle})
+        self.assertEqual(out["searched"], {"Req.Dep.js": busy, "req_other.js": idle})
+        self.assertEqual(out["searched_records"], {"Req.Dep.js": busy})
+        self.assertEqual(out["cleared"],
+                         {"Req.Dep.js": busy, "hold.js": idle, "req_other.js": idle})
+
+    def test_status_regenerate_pending_with_namespace(self):
+        later = "2026-10-12T10:05:00Z"
+        reply = {"status": 200, "json": {"status": "ok", "rebuild_requested_at": None,
+                 "requests": {"RTMH:Req.Dep.js": later, "sandbox|WCS:hold.js": later}}}
+        out = self.run_status_in_node(
+            reply, argv=("--refresh-url", "/api/rebuild", "--summary-namespace", "sandbox"))
+        self.assertEqual({k: v["status"] != "" for k, v in out["inventory"].items()},
+                         {"Req.Dep.js": False, "hold.js": True, "req_other.js": False})
+
+    def test_status_unavailable_on_failure(self):
+        replies = {
+            "default throwing fetch": None,
+            "sync throw": {"sync_throw": True},
+            "rejected": {"reject": True},
+            "http 502": {"status": 502, "json": {"status": "error"}},
+            "http 404": {"status": 404, "json": {}},
+            "bad json": {"status": 200, "bad_json": True},
+            "null body": {"status": 200, "json": None},
+            "array body": {"status": 200, "json": [1]},
+            "string body": {"status": 200, "json": "ok"},
+        }
+        for name, reply in replies.items():
+            with self.subTest(name=name):
+                out = self.run_status_in_node(reply)
+                self.assertEqual(out["refresh_status"], "Status unavailable.")
+                self.assertEqual({v["status"] for v in out["inventory"].values()}, {""})
+                self.assertEqual({v["disabled"] for v in out["inventory"].values()}, {False})
+                if reply is not None:
+                    self.assertEqual(len(out["calls"]), 1)
+
+    def test_status_unparseable_generated_at_means_nothing_pending(self):
+        later = "2999-01-01T00:00:00Z"
+        reply = {"status": 200, "json": {"status": "ok", "rebuild_requested_at": later,
+                 "requests": {"RTMH:Req.Dep.js": later}}}
+        for generated_at in ("not a date", "", None):
+            with self.subTest(generated_at=generated_at):
+                out = self.run_status_in_node(reply, generated_at=generated_at)
+                self.assertEqual(len(out["calls"]), 1)
+                self.assertEqual(out["refresh_status"], "")
+                self.assertEqual({v["status"] for v in out["inventory"].values()}, {""})
+
+    def test_status_does_not_overwrite_click_text(self):
+        # The Regenerate click lands before the status reply is applied; its text stays.
+        prelude_reply = {"status": 200, "json": {"status": "ok", "rebuild_requested_at": None,
+                         "requests": {"RTMH:Req.Dep.js": "2026-10-12T10:05:00Z"}}}
+        tail = """
+var span = null;
+walk(byIdMap['i-list'], function (c) { return c.tagName === 'details'; }).forEach(function (d) {
+    if (entryName(d) === 'Req.Dep.js') {
+        span = walk(d, function (c) { return c.className === 'regen-status'; })[0];
+    }
+});
+span.textContent = 'Regeneration requested. New summary in about 10 minutes, then reload this page.';
+afterTicks(function () { console.log(JSON.stringify(statusReport())); });
+"""
+        out = self.run_status_in_node(prelude_reply, tail=tail)
+        self.assertEqual(out["inventory"]["Req.Dep.js"]["status"],
+                         "Regeneration requested. New summary in about 10 minutes, "
+                         "then reload this page.")
 
     # Theme toggle and script search
 
@@ -1675,6 +1906,75 @@ function enableQuerySelector() {
     Elem.prototype.querySelector = function (tag) {
         return walk(this, function (c) { return c.tagName === tag; })[0] || null;
     };
+}
+
+function editData(fn) {
+    var d = JSON.parse(DATA_TEXT);
+    fn(d);
+    DATA_TEXT = JSON.stringify(d);
+}
+
+// Fake fetch for the load-time status GET: records calls and answers with `reply`
+// ({status, json} | {status, bad_json} | {reject} | {sync_throw}).
+var STATUS_CALLS = [];
+function statusFetch(reply) {
+    fetch = function (url, init) {
+        STATUS_CALLS.push({ url: url, init: init });
+        if (reply.sync_throw) { throw new Error('offline'); }
+        if (reply.reject) { return Promise.reject(new Error('offline')); }
+        return Promise.resolve({
+            status: reply.status,
+            json: function () {
+                return reply.bad_json ? Promise.reject(new SyntaxError('bad'))
+                    : Promise.resolve(reply.json);
+            }
+        });
+    };
+}
+
+function afterTicks(fn) {
+    (async function () {
+        for (var k = 0; k < 5; k++) { await new Promise(function (r) { setTimeout(r, 0); }); }
+        fn();
+    }());
+}
+
+function entryName(d) {
+    return walk(d, function (c) { return c.className === 'name'; })[0].textContent;
+}
+
+function summaryLabels() {
+    var out = {};
+    walk(byIdMap['i-list'], function (c) { return c.tagName === 'details'; }).forEach(function (d) {
+        out[entryName(d)] = walk(d, function (c) {
+            return c.className === 'kind' && /^ · (AI summary|From header comment)/.test(c.textContent);
+        }).map(function (c) { return c.textContent; });
+    });
+    return out;
+}
+
+function regenStatuses(id) {
+    var out = {};
+    walk(byIdMap[id], function (c) { return c.tagName === 'details'; }).forEach(function (d) {
+        var status = walk(d, function (c) { return c.className === 'regen-status'; })[0];
+        if (!status) { out[entryName(d)] = null; return; }
+        var button = status.parentNode.children[0];
+        out[entryName(d)] = { status: status.textContent, disabled: !!button.disabled,
+                              status_is_second: status.parentNode.children[1] === status };
+    });
+    return out;
+}
+
+function areaCard(name) {
+    return byIdMap['rec-cards'].children.filter(function (c) {
+        return c.children[0].textContent === name;
+    })[0];
+}
+
+function statusReport() {
+    var rs = walk(header, function (c) { return c.id === 'refresh-status'; })[0];
+    return { calls: STATUS_CALLS, refresh_status: rs ? rs.textContent : null,
+             inventory: regenStatuses('i-list') };
 }
 
 function themeButton() {

@@ -84,10 +84,10 @@ test("config.path is /api/rebuild", () => {
   assert.equal(mod.config.path, "/api/rebuild");
 });
 
-test("GET returns 405", async () => {
+test("DELETE returns 405", async () => {
   configure();
   const calls = fakeFetch([]);
-  const res = await handler(new Request("http://localhost/api/rebuild", { method: "GET" }));
+  const res = await handler(new Request("http://localhost/api/rebuild", { method: "DELETE" }));
   assert.equal(res.status, 405);
   assert.deepEqual(await read(res), { status: "method_not_allowed" });
   assert.equal(calls.length, 0);
@@ -470,4 +470,168 @@ test("empty body still takes the full-rebuild path", async () => {
   assert.ok(!("key" in body));
   assert.equal(calls[0].url, CONTENTS_URL + "?ref=rebuild-requests");
   assert.equal(putBody(calls[1]).message, "rebuild requested " + body.requested_at);
+});
+
+// Status read: GET returns both request files, with no writes.
+
+function get() {
+  return new Request("http://localhost/api/rebuild", { method: "GET" });
+}
+
+function fileBody(obj) {
+  return { sha: "s", content: Buffer.from(JSON.stringify(obj)).toString("base64") };
+}
+
+function assertAllGets(calls) {
+  for (const call of calls) {
+    assert.equal(call.init.method, "GET");
+    assert.ok(!("body" in call.init));
+  }
+}
+
+test("GET: both files present gives 200 with no-store", async () => {
+  configure();
+  const calls = fakeFetch([
+    jsonResponse(200, fileBody({ requested_at: "2026-10-12T09:58:00Z", id: "x" })),
+    jsonResponse(200, fileBody({ version: 1, requests: {
+      "A:x.js": "2026-10-12T10:00:00Z", "sandbox|A:y.js": "2026-10-12T10:01:00Z" } })),
+  ]);
+  const res = await handler(get());
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await read(res), {
+    status: "ok",
+    rebuild_requested_at: "2026-10-12T09:58:00Z",
+    requests: { "A:x.js": "2026-10-12T10:00:00Z", "sandbox|A:y.js": "2026-10-12T10:01:00Z" },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, CONTENTS_URL + "?ref=rebuild-requests");
+  assert.equal(calls[1].url, RESUMMARIZE_URL + "?ref=rebuild-requests");
+  assertAllGets(calls);
+  for (const call of calls) {
+    const h = new Headers(call.init.headers);
+    assert.equal(h.get("authorization"), "Bearer " + TOKEN);
+    assert.equal(h.get("accept"), "application/vnd.github+json");
+    assert.equal(h.get("x-github-api-version"), "2022-11-28");
+    assert.equal(h.get("user-agent"), "mbsg-script-map");
+  }
+});
+
+test("GET: custom branch and paths are used", async () => {
+  setEnv({ GITHUB_TOKEN: TOKEN, REBUILD_REPO: "o/r", REBUILD_BRANCH: "b x", REBUILD_PATH: "dir/f.json" });
+  process.env.RESUMMARIZE_PATH = "dir/r.json";
+  try {
+    const calls = fakeFetch([jsonResponse(404, {}), jsonResponse(404, {})]);
+    const res = await handler(get());
+    assert.equal(res.status, 200);
+    assert.equal(calls[0].url, "https://api.github.com/repos/o/r/contents/dir/f.json?ref=b%20x");
+    assert.equal(calls[1].url, "https://api.github.com/repos/o/r/contents/dir/r.json?ref=b%20x");
+    assertAllGets(calls);
+  } finally {
+    delete process.env.RESUMMARIZE_PATH;
+  }
+});
+
+test("GET: both files missing gives null and {}", async () => {
+  configure();
+  const calls = fakeFetch([jsonResponse(404, { message: "Not Found" }), jsonResponse(404, {})]);
+  const res = await handler(get());
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await read(res), { status: "ok", rebuild_requested_at: null, requests: {} });
+  assert.equal(calls.length, 2);
+  assertAllGets(calls);
+});
+
+test("GET: malformed files give null and {}", async () => {
+  const cases = [
+    ["not json{", "not json{"],
+    ["null", "null"],
+    ["[1]", '{"version":1,"requests":[]}'],
+    ['{"requested_at":5}', '{"version":1,"requests":"x"}'],
+    ['"2026-10-12T09:58:00Z"', '{"version":1}'],
+  ];
+  for (const [a, b] of cases) {
+    configure();
+    const calls = fakeFetch([
+      jsonResponse(200, { sha: "s", content: Buffer.from(a).toString("base64") }),
+      jsonResponse(200, { sha: "s", content: Buffer.from(b).toString("base64") }),
+    ]);
+    const res = await handler(get());
+    assert.equal(res.status, 200, a);
+    assert.deepEqual(await read(res), { status: "ok", rebuild_requested_at: null, requests: {} }, a);
+    assertAllGets(calls);
+  }
+  configure();
+  fakeFetch([jsonResponse(200, { sha: "s" }), jsonResponse(200, { content: 5 })]);
+  const res = await handler(get());
+  assert.equal(res.status, 200);
+  assert.deepEqual(await read(res), { status: "ok", rebuild_requested_at: null, requests: {} });
+});
+
+test("GET: non-string request values are dropped", async () => {
+  configure();
+  fakeFetch([
+    jsonResponse(404, {}),
+    jsonResponse(200, fileBody({ version: 1, requests: {
+      "A:ok.js": "2026-10-12T10:00:00Z", "A:num.js": 5, "A:null.js": null,
+      "A:obj.js": { t: "x" }, "A:bad.js": "not a date" } })),
+  ]);
+  const res = await handler(get());
+  assert.equal(res.status, 200);
+  assert.deepEqual((await read(res)).requests,
+    { "A:ok.js": "2026-10-12T10:00:00Z", "A:bad.js": "not a date" });
+});
+
+test("GET: GitHub 500 gives 502, no PUT", async () => {
+  for (const replies of [
+    [jsonResponse(500, {})],
+    [jsonResponse(404, {}), jsonResponse(500, {})],
+  ]) {
+    configure();
+    const calls = fakeFetch(replies);
+    const res = await handler(get());
+    assert.equal(res.status, 502);
+    assert.deepEqual(await read(res), { status: "error", error: "github 500" });
+    assert.equal(calls.length, replies.length);
+    assertAllGets(calls);
+  }
+});
+
+test("GET: fetch throwing gives 502, token redacted", async () => {
+  for (const replies of [
+    [() => { throw new Error("connect failed " + TOKEN); }],
+    [jsonResponse(404, {}), () => { throw new Error("read failed " + TOKEN); }],
+  ]) {
+    configure();
+    const calls = fakeFetch(replies);
+    const res = await handler(get());
+    assert.equal(res.status, 502);
+    const body = await read(res);
+    assert.equal(body.status, "error");
+    assert.match(body.error, /^github (connect|read) failed \*\*\*$/);
+    assertAllGets(calls);
+  }
+});
+
+test("GET: missing env gives 500 with no GitHub calls", async () => {
+  for (const env of [{}, { GITHUB_TOKEN: TOKEN }, { REBUILD_REPO: "o/r" }]) {
+    setEnv(env);
+    const calls = fakeFetch([]);
+    const res = await handler(get());
+    assert.equal(res.status, 500);
+    assert.deepEqual(await read(res), { status: "error", error: "not configured" });
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("other methods still return 405", async () => {
+  for (const method of ["PUT", "PATCH", "DELETE"]) {
+    configure();
+    const calls = fakeFetch([]);
+    const res = await handler(new Request("http://localhost/api/rebuild", { method }));
+    assert.equal(res.status, 405, method);
+    assert.deepEqual(await read(res), { status: "method_not_allowed" });
+    assert.equal(calls.length, 0);
+  }
 });
