@@ -61,6 +61,19 @@ header {
 }
 header h1 { font-size: 18px; margin: 0; }
 #generated { color: var(--muted); font-size: 12px; }
+#refresh { display: inline-flex; align-items: center; gap: 8px; }
+#refresh button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+#refresh button:disabled { cursor: default; opacity: 0.6; }
+#refresh-status { color: var(--muted); font-size: 12px; }
 #repo-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
     border: 1px solid var(--border);
@@ -350,6 +363,59 @@ main { padding: 12px 16px; }
     }
     updateGenerated();
     setInterval(updateGenerated, 60000);
+
+    function hhmm(ms) {
+        var d = new Date(ms);
+        function pad(n) { return (n < 10 ? '0' : '') + n; }
+        return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+    }
+
+    var refreshUrl = String(data.refresh_url || '');
+    if (refreshUrl) {
+        var refreshWrap = el('span');
+        refreshWrap.id = 'refresh';
+        var refreshButton = el('button', null, 'Refresh data');
+        refreshButton.type = 'button';
+        var refreshStatus = el('span');
+        refreshStatus.id = 'refresh-status';
+        refreshStatus.setAttribute('role', 'status');
+        refreshWrap.appendChild(refreshButton);
+        refreshWrap.appendChild(refreshStatus);
+        generatedEl.parentNode.insertBefore(refreshWrap, generatedEl.nextSibling);
+        var refreshFailed = function (text) {
+            refreshStatus.textContent = text;
+            refreshButton.disabled = false;
+        };
+        refreshButton.addEventListener('click', function () {
+            refreshButton.disabled = true;
+            refreshStatus.textContent = '';
+            fetch(refreshUrl, { method: 'POST' }).then(function (res) {
+                if (res.status === 202) {
+                    refreshStatus.textContent =
+                        'Refresh requested. New data in about 10 minutes, then reload this page.';
+                    return;
+                }
+                if (res.status !== 429) {
+                    refreshFailed('Refresh failed (HTTP ' + res.status + ').');
+                    return;
+                }
+                return res.json().then(function (body) {
+                    var when = Date.parse(body && typeof body.requested_at === 'string' ?
+                        body.requested_at : '');
+                    if (isNaN(when)) {
+                        refreshFailed('Refresh failed (HTTP 429).');
+                        return;
+                    }
+                    refreshFailed('A refresh was already requested at ' + hhmm(when) +
+                        ' UTC. Try again after ' + hhmm(when + 600000) + ' UTC.');
+                }, function () {
+                    refreshFailed('Refresh failed (network error).');
+                });
+            }).catch(function () {
+                refreshFailed('Refresh failed (network error).');
+            });
+        });
+    }
     var chips = document.getElementById('repo-chips');
     (data.repos || []).forEach(function (r) {
         var chip = el('span', 'chip' + (r.branch === 'main' ? '' : ' unverified'),

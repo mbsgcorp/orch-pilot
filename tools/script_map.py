@@ -602,10 +602,18 @@ def main(argv=None):
     parser.add_argument("--title", default="Script map", help="page title")
     parser.add_argument("--summaries", default=None, metavar="FILE",
                         help="summary cache written by script_map_summarize.py")
+    parser.add_argument("--refresh-url", default=None, metavar="PATH",
+                        help="site-relative path for the Refresh data button, e.g. /api/rebuild")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
+    if args.refresh_url is not None and (
+            not args.refresh_url.startswith("/")
+            or any(c.isspace() for c in args.refresh_url)):
+        print("error: --refresh-url must be a site-relative path starting with /",
+              file=sys.stderr)
+        return 2
 
     repos = []
     labels = set()
@@ -666,6 +674,7 @@ def main(argv=None):
             print(f"error: cannot read {exc.filename}: {exc.strerror}", file=sys.stderr)
         return 2
     data["title"] = args.title
+    data["refresh_url"] = args.refresh_url or ""
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         page = render(data)

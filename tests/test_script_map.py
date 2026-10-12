@@ -111,6 +111,42 @@ class ScriptMapTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--repo", result.stdout)
 
+    def test_help_mentions_refresh_url(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--refresh-url", result.stdout)
+
+    def test_refresh_url_set(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--refresh-url", "/api/rebuild"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("script_map: "))
+        _, data = self.read_data()
+        self.assertEqual(data["refresh_url"], "/api/rebuild")
+
+    def test_refresh_url_default_empty(self):
+        repo = self.make_repo("a")
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        _, data = self.read_data()
+        self.assertEqual(data["refresh_url"], "")
+
+    def test_refresh_url_invalid(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        for value in ("api/rebuild", "https://example.test/api/rebuild", "/api/re build"):
+            with self.subTest(value=value):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--refresh-url", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(
+                    err, "error: --refresh-url must be a site-relative path starting with /\n")
+                self.assertEqual(out, "")
+                self.assertFalse(self.out.exists())
+
     def test_main_branch_passes(self):
         repo = self.make_repo("a")
         self.write("a/UserEvent/ue.js", USER_EVENT)
@@ -759,7 +795,9 @@ var u = 'CUSTOMRECORD99';
                       "Order within a step follows deployment order in NetSuite, "
                       "which isn't in the code.", "prefers-color-scheme",
                       "Summary", "AI summary", "From header comment", "No description",
-                      "Last updated"):
+                      "Last updated", "Refresh data", "Refresh requested.",
+                      "Refresh failed (HTTP ", "Refresh failed (network error).",
+                      "Try again after"):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
