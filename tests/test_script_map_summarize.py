@@ -1001,6 +1001,344 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 5 failed, "
                               f"0 deferred, 0 pruned -> {self.cache}\n")
 
+    # --notes
+
+    def note(self, note_id, created_at="2026-10-01T00:00:00Z", text=None, **extra):
+        value = {"id": note_id, "text": text if text is not None else f"Note {note_id}.",
+                 "author": "Kevin", "created_at": created_at, "cleared_at": None,
+                 "cleared_by": None, "clear_reason": None}
+        value.update(extra)
+        return value
+
+    def cleared(self, note_id, created_at="2026-10-01T00:00:00Z"):
+        return self.note(note_id, created_at, cleared_at="2026-10-02T00:00:00Z",
+                         cleared_by="Sam", clear_reason="Fixed.")
+
+    def write_notes(self, notes):
+        path = self.root / "notes.json"
+        path.write_text(json.dumps({"version": 1, "notes": notes}), encoding="utf-8")
+        return path
+
+    def fp(self, *ids):
+        return hashlib.sha256(json.dumps(sorted(ids)).encode("utf-8")).hexdigest()
+
+    def notes_section(self, *texts):
+        return ("\n\n" + script_map_summarize.NOTES_HEADER + "\n"
+                + "\n".join(f"- {t}" for t in texts))
+
+    def test_help_mentions_notes(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--notes", result.stdout)
+        self.assertIn("--notes", script_map_summarize.__doc__)
+        self.assertIn("notes_sha", script_map_summarize.__doc__)
+
+    def test_notes_header_text(self):
+        self.assertEqual(script_map_summarize.NOTES_HEADER,
+                         "Reviewer notes from the MBSG team about this script. Check each note "
+                         "against the code; if the code contradicts a note, follow the code:")
+
+    def test_notes_missing_or_invalid_file_exits_2(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        missing = self.root / "missing.json"
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(missing)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(err, f"error: {missing} does not exist\n")
+        call.assert_not_called()
+        self.assertFalse(self.cache.exists())
+        for name, text in (("bad.json", "{not json"),
+                           ("v2.json", json.dumps({"version": 2, "notes": {}})),
+                           ("list.json", json.dumps({"version": 1, "notes": []})),
+                           ("top.json", "[]")):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.write_text(text, encoding="utf-8")
+                code, out, err, call = self.run_main(self.args(("A", repo))
+                                                     + ["--notes", str(path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, f"error: {path} is not a valid notes file\n")
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
+    def test_notes_without_active_notes_regenerates_nothing(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "sl.js": SUITELET})
+        entries = {"A:ue.js": self.entry(self.sha(repo / "ue.js")),
+                   "A:sl.js": self.entry(self.sha(repo / "sl.js"))}
+        self.write_cache(entries)
+        notes = self.write_notes({"A:ue.js": [self.cleared("c1")], "A:other.js": [self.note("o")]})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(self.read_cache()["entries"], entries)
+        self.assertEqual(out, f"script_map_summarize: 2 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_malformed_notes_ignored(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "sl.js": SUITELET})
+        entries = {"A:ue.js": self.entry(self.sha(repo / "ue.js")),
+                   "A:sl.js": self.entry(self.sha(repo / "sl.js"))}
+        self.write_cache(entries)
+        notes = self.write_notes({
+            "A:ue.js": ["junk", None, {"id": 5, "text": "t", "author": "a", "created_at": "c"},
+                        {"id": "x", "text": "t", "author": "a"}],
+            "A:sl.js": "not a list",
+        })
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(self.read_cache()["entries"], entries)
+
+    def test_prompt_has_notes_section_oldest_first(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        notes = self.write_notes({"A:ue.js": [
+            self.note("b", "2026-10-05T00:00:00Z", text="Second\nline two."),
+            self.cleared("c", "2026-09-01T00:00:00Z"),
+            self.note("a", "2026-10-01T00:00:00Z", text="It says X, actually Y."),
+        ]})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                             reply="Fixed.")
+        self.assertEqual(code, 0, err)
+        user = "File: ue.js\nScript type: UserEventScript\n\n" + USER_EVENT
+        expected = (script_map_summarize.SYSTEM_PROMPT + "\n\n" + user
+                    + self.notes_section("It says X, actually Y.", "Second line two."))
+        self.assertEqual(call.call_args.args[1], expected)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual(entry["notes_sha"], self.fp("a", "b"))
+        self.assertEqual(entry["summary"], "Fixed.")
+
+    def test_prompt_unchanged_without_active_notes(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        notes = self.write_notes({"A:ue.js": [self.cleared("c")]})
+        code, _, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        user = "File: ue.js\nScript type: UserEventScript\n\n" + USER_EVENT
+        self.assertEqual(call.call_args.args[1],
+                         script_map_summarize.SYSTEM_PROMPT + "\n\n" + user)
+        self.assertNotIn("Reviewer notes", call.call_args.args[1])
+        self.assertEqual(self.read_cache()["entries"]["A:ue.js"]["notes_sha"], "")
+
+    def test_every_new_and_reused_entry_has_notes_sha(self):
+        repo = self.make_repo("a", {"x.js": USER_EVENT, "y.js": USER_EVENT})
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:x.js"]["notes_sha"], "")
+        self.assertEqual(entries["A:y.js"]["notes_sha"], "")
+        self.assertIn("0 cached, 1 reused, 1 new", out)
+
+    def test_fingerprint_value(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        notes = self.write_notes({"A:ue.js": [self.note("zz"), self.note("aa"),
+                                              self.cleared("mm")]})
+        code, _, err, _ = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        expected = hashlib.sha256(json.dumps(["aa", "zz"]).encode("utf-8")).hexdigest()
+        self.assertEqual(self.read_cache()["entries"]["A:ue.js"]["notes_sha"], expected)
+
+    def test_notes_driven_regeneration_ignores_limit(self):
+        repo = self.five_files()
+        entries = {f"A:f{i}.js": self.entry(self.sha(repo / f"f{i}.js")) for i in (0, 3)}
+        self.write_cache(entries)
+        notes = self.write_notes({"A:f3.js": [self.note("n1")]})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--limit", "1", "--notes", str(notes)],
+            reply=["One.", "Three."])
+        self.assertEqual(code, 0, err)
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: f1.js", "File: f3.js"])
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:f0.js", "A:f1.js", "A:f3.js"})
+        self.assertEqual(entries["A:f3.js"]["summary"], "Three.")
+        self.assertEqual(entries["A:f3.js"]["notes_sha"], self.fp("n1"))
+        self.assertEqual(entries["A:f3.js"]["model"], COMMAND)
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 2 new, 0 failed, "
+                              f"2 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_notes_driven_failure_keeps_old_entry(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        old = self.entry(self.sha(repo / "ue.js"), "Wrong.")
+        self.write_cache({"A:ue.js": old})
+        notes = self.write_notes({"A:ue.js": [self.note("n1")]})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--notes", str(notes)],
+            reply=script_map_summarize.SummaryError("exit 1"))
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(err, "warning: A:ue.js summary failed: exit 1\n")
+        self.assertEqual(self.read_cache()["entries"], {"A:ue.js": old})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 1 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_notes_driven_success_does_not_propagate(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        copy = self.entry(sha, "Copy.")
+        self.write_cache({"A:ue.js": self.entry(sha, "Wrong."), "B:ue.js": copy,
+                          "sandbox|A:ue.js": copy})
+        notes = self.write_notes({"A:ue.js": [self.note("n1")]})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                             reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["summary"], "Right.")
+        self.assertEqual(entries["B:ue.js"], copy)
+        self.assertEqual(entries["sandbox|A:ue.js"], copy)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_notes_driven_counts_toward_failure_streak(self):
+        repo = self.five_files()
+        entries = {f"A:f{i}.js": self.entry(self.sha(repo / f"f{i}.js")) for i in range(5)}
+        self.write_cache(entries)
+        notes = self.write_notes({f"A:f{i}.js": [self.note(f"n{i}")] for i in range(5)})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                             reply=[fail] * 5)
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 3)
+        self.assertIn("warning: stopping after 3 consecutive failures; 2 files not attempted",
+                      err)
+        self.assertEqual(self.read_cache()["entries"], entries)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 5 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_active_notes_file_not_filled_by_reuse(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"B:ue.js": self.entry(self.sha(repo / "ue.js"), "Shared.")})
+        notes = self.write_notes({"A:ue.js": [self.note("n1")]})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                             reply="With notes.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("Reviewer notes", call.call_args.args[1])
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["summary"], "With notes.")
+        self.assertEqual(entries["B:ue.js"]["summary"], "Shared.")
+        self.assertIn("0 cached, 0 reused, 1 new", out)
+
+    def test_identical_files_in_two_repos_with_different_notes(self):
+        a = self.make_repo("a", {"ue.js": USER_EVENT})
+        b = self.make_repo("b", {"ue.js": USER_EVENT, "plain.js": USER_EVENT + "// c\n"})
+        self.write(b, "copy.js", USER_EVENT)
+        notes = self.write_notes({"A:ue.js": [self.note("na", text="A note.")],
+                                  "B:ue.js": [self.note("nb", text="B note.")]})
+        code, out, err, call = self.run_main(
+            self.args(("A", a), ("B", b)) + ["--notes", str(notes)],
+            reply=["A summary.", "Copy summary.", "Plain summary.", "B summary."])
+        self.assertEqual(code, 0, err)
+        prompts = [c.args[1] for c in call.call_args_list]
+        self.assertEqual(len(prompts), 4)
+        self.assertTrue(prompts[0].endswith(self.notes_section("A note.")))
+        self.assertNotIn("Reviewer notes", prompts[1])
+        self.assertTrue(prompts[3].endswith(self.notes_section("B note.")))
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["summary"], "A summary.")
+        self.assertEqual(entries["A:ue.js"]["notes_sha"], self.fp("na"))
+        self.assertEqual(entries["B:copy.js"]["summary"], "Copy summary.")
+        self.assertEqual(entries["B:copy.js"]["notes_sha"], "")
+        self.assertEqual(entries["B:ue.js"]["summary"], "B summary.")
+        self.assertEqual(entries["B:ue.js"]["notes_sha"], self.fp("nb"))
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 4 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+        # A second run is fully cached and nothing is overwritten.
+        code, out, err, call = self.run_main(
+            self.args(("A", a), ("B", b)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(self.read_cache()["entries"], entries)
+        self.assertIn("4 cached, 0 reused, 0 new", out)
+
+    def test_note_cleared_after_run_regenerates_once_without_notes(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        notes = self.write_notes({"A:ue.js": [self.note("n1")]})
+        code, _, err, _ = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                        reply="With note.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read_cache()["entries"]["A:ue.js"]["notes_sha"], self.fp("n1"))
+
+        notes = self.write_notes({"A:ue.js": [self.cleared("n1")]})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)],
+                                             reply="Without note.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertNotIn("Reviewer notes", call.call_args.args[1])
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual((entry["summary"], entry["notes_sha"]), ("Without note.", ""))
+        self.assertIn("0 cached, 0 reused, 1 new", out)
+
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertIn("1 cached, 0 reused, 0 new", out)
+
+    def test_without_notes_flag_entry_with_notes_sha_regenerates(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"A:ue.js": dict(self.entry(self.sha(repo / "ue.js")),
+                                          notes_sha=self.fp("n1"))})
+        code, out, err, call = self.run_main(self.args(("A", repo)), reply="Plain.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(self.read_cache()["entries"]["A:ue.js"]["notes_sha"], "")
+
+    def test_namespaced_key_reads_plain_notes_id(self):
+        repo = self.make_repo("r", {"x.js": USER_EVENT}, head=self.SANDBOX_HEAD)
+        notes = self.write_notes({"A:x.js": [self.note("n1", text="Plain id note.")],
+                                  "sandbox|A:x.js": [self.note("n2", text="Ignored.")]})
+        code, _, err, call = self.run_main(
+            self.args(("A", repo)) + ["--branch", "sandbox", "--namespace", "sandbox",
+                                      "--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(call.call_args.args[1].endswith(self.notes_section("Plain id note.")))
+        self.assertEqual(self.read_cache()["entries"]["sandbox|A:x.js"]["notes_sha"],
+                         self.fp("n1"))
+
+    def test_force_with_notes_stores_notes_sha_and_limits_propagation(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        plain = self.entry(sha, "Plain copy.")
+        self.write_cache({"A:ue.js": self.entry(sha, "Wrong."),
+                          "B:copy.js": plain,
+                          "sandbox|A:ue.js": self.entry(sha, "Wrong sandbox."),
+                          "C:other.js": self.entry(sha, "Other notes.")})
+        notes = self.write_notes({"A:ue.js": [self.note("n1", text="Shared note.")],
+                                  "C:other.js": [self.note("c1")]})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--notes", str(notes)],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertTrue(call.call_args.args[1].endswith(self.notes_section("Shared note.")))
+        entries = self.read_cache()["entries"]
+        fresh = entries["A:ue.js"]
+        self.assertEqual((fresh["summary"], fresh["notes_sha"]), ("Right.", self.fp("n1")))
+        # sandbox|A:ue.js shares A:ue.js's notes, so it gets the forced summary.
+        self.assertEqual(entries["sandbox|A:ue.js"], fresh)
+        self.assertEqual(entries["B:copy.js"], plain)
+        self.assertEqual(entries["C:other.js"]["summary"], "Other notes.")
+        self.assertIn("0 cached, 0 reused, 1 new", out)
+
+    def test_force_without_notes_skips_entries_with_notes(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        noted = self.entry(sha, "Noted.")
+        self.write_cache({"A:ue.js": self.entry(sha, "Wrong."), "B:copy.js": self.entry(sha),
+                          "C:noted.js": noted})
+        notes = self.write_notes({"C:noted.js": [self.note("c1")]})
+        code, _, err, _ = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--notes", str(notes)],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["notes_sha"], "")
+        self.assertEqual(entries["B:copy.js"], entries["A:ue.js"])
+        self.assertEqual(entries["C:noted.js"], noted)
+
 
 if __name__ == "__main__":
     unittest.main()

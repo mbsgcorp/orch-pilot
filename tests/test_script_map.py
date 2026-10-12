@@ -1739,6 +1739,151 @@ console.log(JSON.stringify(out));
         self.assertEqual(out["risk_empty"], ["No scripts found"])
         self.assertEqual(out["rec_chips"], ["No scripts found"])
 
+    # Correction notes (--notes) and team names (--team)
+
+    def note(self, note_id, created_at="2026-10-01T00:00:00Z", **extra):
+        value = {"id": note_id, "text": f"Note {note_id}.", "author": "Kevin",
+                 "created_at": created_at, "cleared_at": None, "cleared_by": None,
+                 "clear_reason": None}
+        value.update(extra)
+        return value
+
+    def write_notes(self, notes, name="notes.json"):
+        path = self.root / name
+        path.write_text(json.dumps({"version": 1, "notes": notes}), encoding="utf-8")
+        return path
+
+    def notes_repo(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        self.write("a/cs.js", CLIENT_SCRIPT)
+        return repo
+
+    def test_help_mentions_notes_and_team(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--notes", result.stdout)
+        self.assertIn("--team", result.stdout)
+
+    def test_notes_missing_or_invalid_file_exits_2_without_output(self):
+        repo = self.notes_repo()
+        missing = self.root / "missing.json"
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--notes", str(missing)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(err, f"error: {missing} does not exist\n")
+        self.assertFalse(self.out.exists())
+        for name, text in (("bad.json", "{not json"),
+                           ("v2.json", json.dumps({"version": 2, "notes": {}})),
+                           ("list.json", json.dumps({"version": 1, "notes": []})),
+                           ("none.json", json.dumps({"version": 1})),
+                           ("array.json", "[1]"),
+                           ("binary.json", b"\xff\xfe")):
+            with self.subTest(name=name):
+                path = self.write(name, text)
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--notes", str(path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, f"error: {path} is not a valid notes file\n")
+                self.assertFalse(self.out.exists())
+
+    def test_notes_on_script_nodes_sorted_and_normalized(self):
+        repo = self.notes_repo()
+        cleared = self.note("c1", "2026-10-02T00:00:00Z", cleared_at="2026-10-03T00:00:00Z",
+                            cleared_by="Sam", clear_reason="Wrong.")
+        late = self.note("n2", "2026-10-05T00:00:00Z")
+        early = self.note("n1", "2026-09-01T00:00:00Z", extra="dropped")
+        odd = self.note("n3", "2026-10-04T00:00:00Z", cleared_at=5, cleared_by=None,
+                        clear_reason=["x"])
+        notes = self.write_notes({
+            "A:ue.js": [late, cleared, "junk", None, {"id": 5, "text": "t", "author": "a",
+                                                       "created_at": "c"},
+                        {"id": "x", "text": "t", "author": "a"}, early, odd],
+            "A:cs.js": "not a list",
+            "A:gone.js": [self.note("g")],
+        })
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        nodes = self.scripts(self.read_data()[1])
+        expected_early = dict(early)
+        del expected_early["extra"]
+        expected_odd = dict(odd, cleared_at=None, clear_reason=None)
+        self.assertEqual(nodes["ue.js"]["notes"], [expected_early, cleared, expected_odd, late])
+        self.assertEqual(nodes["cs.js"]["notes"], [])
+
+    def test_notes_with_namespace_keyed_by_plain_id(self):
+        repo = self.make_repo("a", "ref: refs/heads/sandbox\n")
+        self.write("a/ue.js", USER_EVENT)
+        note = self.note("n1")
+        notes = self.write_notes({"A:ue.js": [note], "sandbox|A:ue.js": [self.note("wrong")]})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--branch", "sandbox", "--summary-namespace", "sandbox",
+                                      "--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        node = self.scripts(self.read_data()[1])["ue.js"]
+        self.assertEqual(node["summary_key"], "sandbox|A:ue.js")
+        self.assertEqual(node["notes"], [note])
+
+    def test_notes_equal_created_at_keeps_file_order(self):
+        repo = self.notes_repo()
+        first, second = self.note("b"), self.note("a")
+        notes = self.write_notes({"A:ue.js": [first, second]})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--notes", str(notes)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.scripts(self.read_data()[1])["ue.js"]["notes"], [first, second])
+
+    def test_collect_without_notes_has_no_notes_field(self):
+        repo = self.notes_repo()
+        node = self.scripts(script_map.collect([("A", repo)]))["ue.js"]
+        self.assertNotIn("notes", node)
+        node = self.scripts(script_map.collect([("A", repo)], notes={}))["ue.js"]
+        self.assertEqual(node["notes"], [])
+
+    def test_team_trimmed_deduped_and_sorted(self):
+        repo = self.notes_repo()
+        argv = ["--repo", f"A={repo}", "--out", str(self.out)]
+        for name in ("  zoe ", "Kevin", "adam", "Zoë", "kevin", "Kevin ", "Adam", "a" * 40):
+            argv += ["--team", name]
+        code, _, err = self.run_main(argv)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read_data()[1]["team"],
+                         ["a" * 40, "Adam", "adam", "Kevin", "kevin", "zoe", "Zoë"])
+
+    def test_team_rejections_exit_2_without_output(self):
+        repo = self.notes_repo()
+        for name in ("", "   ", "a" * 41, "tab\tname", "new\nline", "del\x7f", "nul\x00"):
+            with self.subTest(name=name):
+                code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                                "--team", "Kevin", "--team", name])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, "error: --team must be 1-40 characters\n")
+                self.assertFalse(self.out.exists())
+
+    def test_without_notes_and_team_defaults_to_empty(self):
+        repo = self.notes_repo()
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        data = self.read_data()[1]
+        self.assertEqual(data["team"], [])
+        scripts = self.scripts(data)
+        self.assertEqual(set(scripts), {"ue.js", "cs.js"})
+        for node in scripts.values():
+            self.assertEqual(node["notes"], [])
+        for node in data["nodes"]:
+            if node["kind"] != "script":
+                self.assertNotIn("notes", node)
+        baseline = script_map.collect([("A", repo)])
+        for key in ("repos", "edges", "skipped", "record_categories"):
+            self.assertEqual(data[key], baseline[key])
+        for node, plain in zip(data["nodes"], baseline["nodes"]):
+            self.assertEqual({k: v for k, v in node.items() if k != "notes"}, plain)
+
 
 DOM_SHIM = r"""
 function Elem(tag) {

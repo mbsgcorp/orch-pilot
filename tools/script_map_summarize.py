@@ -5,7 +5,7 @@ Usage: python3 tools/script_map_summarize.py --repo LABEL=PATH [--repo LABEL=PAT
                                              --cache FILE --command "CMD" [--max-chars N]
                                              [--limit N] [--timeout SECONDS]
                                              [--branch NAME] [--namespace NAME]
-                                             [--force KEY ...]
+                                             [--force KEY ...] [--notes FILE]
 
 Summaries come from a local command (for example a subscription CLI such as
 Codex): --command is split like a shell would split it, then run without a
@@ -34,16 +34,33 @@ namespace only; entries for repos not passed and entries in other namespaces
 are kept. The cache is written atomically even when some files fail.
 
 The cache is JSON: {"version": 1, "entries": {"[NAME|]LABEL:rel/path.js":
-{"sha256", "summary", "model", "generated_at"}}}; "model" holds the --command
-string. The "NAME|" prefix is present only when --namespace NAME is given (for
-example "sandbox|RTMH:x.js"), so prod and sandbox runs keep separate entries.
+{"sha256", "summary", "model", "generated_at", "notes_sha"}}}; "model" holds the
+--command string and "notes_sha" the notes fingerprint the summary was made with
+("" when none; a missing field counts as ""). The "NAME|" prefix is present only
+when --namespace NAME is given (for example "sandbox|RTMH:x.js"), so prod and
+sandbox runs keep separate entries.
+
+--notes FILE reads the correction notes file kept by the site's rebuild
+function: {"version": 1, "notes": {"LABEL:path": [{"id", "text", "author",
+"created_at", "cleared_at", "cleared_by", "clear_reason"}, ...]}}. A file's notes
+are those under its cache key without the "NAME|" prefix; a note is active when
+cleared_at is null, and malformed notes are ignored. Active notes (oldest first)
+are appended to the prompt under a "Reviewer notes from the MBSG team" heading.
+The notes fingerprint is "" with no active notes, else the SHA-256 of the JSON
+list of sorted active note ids. A file cached for the same sha256 but a
+different notes_sha is regenerated: the command is always run, it does not count
+toward --limit but does count toward the failure streak, and on success only its
+own entry is replaced (counted as new). A file with active notes is never filled
+by hash reuse, and a summary made with notes is never reused for another key. A
+missing or invalid notes file is an input error (exit 2).
 
 --force KEY (repeatable) regenerates the summary for that cache key even when
 it is cached: the command is always run for it (no cache or hash reuse), it
 does not count toward --limit but does count toward the failure streak. On
 success the entry is replaced, counted as new, and every other entry (any key,
-any namespace) with the same sha256 gets the same summary, model and
-generated_at. On failure the old entry is kept and the file counts as failed.
+any namespace) with the same sha256 and the same notes fingerprint gets the same
+summary, model, generated_at and notes_sha. The key's active notes are included
+in the prompt. On failure the old entry is kept and the file counts as failed.
 Keys for another namespace than --namespace are ignored; a key in this
 namespace that matches no file found in this run prints
 "warning: --force key not found: KEY" to stderr and is not a failure.
@@ -82,6 +99,8 @@ MAX_FAILURE_STREAK = 3
 MAX_STDERR = 200
 EXAMPLE_COMMAND = "codex exec --skip-git-repo-check -"
 NAMESPACE_RE = re.compile(r"[A-Za-z0-9_-]*")
+NOTES_HEADER = ("Reviewer notes from the MBSG team about this script. Check each note "
+                "against the code; if the code contradicts a note, follow the code:")
 
 
 class SummaryError(Exception):
@@ -188,6 +207,10 @@ def main(argv=None):
     parser.add_argument("--force", action="append", default=[], metavar="KEY",
                         help="cache key ([NAME|]LABEL:path) to regenerate even when cached; "
                              "repeatable; keys for other namespaces are ignored")
+    parser.add_argument("--notes", default=None, metavar="FILE",
+                        help="correction notes file (summary-notes.json); active notes are "
+                             "added to the prompt and a changed set of notes regenerates "
+                             "the summary")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -258,14 +281,41 @@ def main(argv=None):
     entries = cache["entries"]
     ns_prefix = f"{args.namespace}|" if args.namespace else ""
 
+    notes = {}
+    if args.notes is not None:
+        try:
+            notes = script_map.load_notes(args.notes)
+        except FileNotFoundError:
+            print(f"error: {args.notes} does not exist", file=sys.stderr)
+            return 2
+        except (OSError, ValueError):
+            print(f"error: {args.notes} is not a valid notes file", file=sys.stderr)
+            return 2
+
+    def active_notes(key):
+        found_notes = [note for note in
+                       script_map.normalize_notes(notes.get(script_map.notes_id(key)))
+                       if note["cleared_at"] is None]
+        return sorted(found_notes, key=lambda note: note["created_at"])
+
+    def fingerprint(active):
+        if not active:
+            return ""
+        ids = sorted(note["id"] for note in active)
+        return hashlib.sha256(json.dumps(ids).encode("utf-8")).hexdigest()
+
     def now():
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def reusable(value):
+        return (isinstance(value, dict) and isinstance(value.get("sha256"), str)
+                and isinstance(value.get("summary"), str)
+                and value.get("notes_sha", "") == "")
 
     by_sha = {}
     for key in sorted(entries):
         value = entries[key]
-        if (isinstance(value, dict) and isinstance(value.get("sha256"), str)
-                and isinstance(value.get("summary"), str)):
+        if reusable(value):
             by_sha.setdefault(value["sha256"], value)
 
     def key_namespace(key):
@@ -275,7 +325,7 @@ def main(argv=None):
     forced = {key for key in args.force if key_namespace(key) == args.namespace}
 
     cached = reused = new = failed = deferred = not_attempted = streak = 0
-    forced_new = 0
+    forced_new = notes_new = 0
     found = set()
     for label, root in repos:
         walk_errors = []
@@ -298,21 +348,28 @@ def main(argv=None):
             if not is_script:
                 continue
             force = key in forced
+            active = active_notes(key)
+            fp = fingerprint(active)
             entry = entries.get(key)
+            notes_driven = False
             if not force and isinstance(entry, dict) and entry.get("sha256") == sha:
-                cached += 1
-                continue
-            source = None if force else by_sha.get(sha)
+                if entry.get("notes_sha", "") == fp:
+                    cached += 1
+                    continue
+                notes_driven = True
+            source = None if force or notes_driven or fp else by_sha.get(sha)
             if source is not None:
                 entries[key] = {
                     "sha256": sha,
                     "summary": source["summary"],
                     "model": source.get("model", ""),
                     "generated_at": now(),
+                    "notes_sha": "",
                 }
                 reused += 1
                 continue
-            if not force and args.limit and new - forced_new >= args.limit:
+            if (not force and not notes_driven and args.limit
+                    and new - forced_new - notes_new >= args.limit):
                 deferred += 1
                 continue
             if streak >= MAX_FAILURE_STREAK:
@@ -321,6 +378,9 @@ def main(argv=None):
                 continue
             user = f"File: {rel}\nScript type: {script_type}\n\n{text[:args.max_chars]}"
             prompt = f"{SYSTEM_PROMPT}\n\n{user}"
+            if active:
+                prompt += "\n\n" + NOTES_HEADER + "\n" + "\n".join(
+                    "- " + note["text"].replace("\n", " ") for note in active)
             try:
                 reply = call_command(command_argv, prompt, args.timeout)
             except SummaryError as exc:
@@ -333,16 +393,21 @@ def main(argv=None):
                 "summary": " ".join(reply.split())[:MAX_SUMMARY],
                 "model": args.command,
                 "generated_at": now(),
+                "notes_sha": fp,
             }
             if force:
                 fresh = entries[key]
                 for other, value in entries.items():
-                    if other != key and isinstance(value, dict) and value.get("sha256") == sha:
-                        for field in ("summary", "model", "generated_at"):
+                    if (other != key and isinstance(value, dict) and value.get("sha256") == sha
+                            and fingerprint(active_notes(other)) == fp):
+                        for field in ("summary", "model", "generated_at", "notes_sha"):
                             value[field] = fresh[field]
-                by_sha[sha] = fresh
+                if fp == "":
+                    by_sha[sha] = fresh
                 forced_new += 1
-            else:
+            elif notes_driven:
+                notes_new += 1
+            elif fp == "":
                 by_sha.setdefault(sha, entries[key])
             new += 1
             streak = 0

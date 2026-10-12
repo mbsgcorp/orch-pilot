@@ -8,6 +8,7 @@ Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    [--switch-url PATH --switch-label TEXT]
                                    [--missing-repo LABEL ...]
                                    [--summary-namespace NAME]
+                                   [--notes FILE] [--team NAME ...]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
@@ -43,6 +44,13 @@ Each script node also carries "summary_key", the summary cache key the
 script_map_summarize.py run for this page would write: "NAME|LABEL:path" with
 --summary-namespace NAME, else "LABEL:path". The page's Regenerate summary
 button sends it to --refresh-url.
+
+--notes FILE reads the correction notes file kept by the site's rebuild
+function ({"version": 1, "notes": {"LABEL:path": [note, ...]}}). Each script
+node gets "notes": every valid note stored under its id "LABEL:path" (active and
+cleared, oldest first), or []. A missing or invalid file prints an error and
+exits 2. Each --team NAME (repeatable, trimmed, 1-40 characters, no control
+characters) is listed in the page's "team" field, sorted case-insensitively.
 """
 
 import argparse
@@ -171,6 +179,55 @@ def load_summary_cache(path):
             or not isinstance(cache.get("entries"), dict)):
         raise ValueError(f"{path} is not a valid summary cache")
     return cache
+
+
+NOTE_FIELDS = ("id", "text", "author", "created_at")
+NOTE_CLEARED_FIELDS = ("cleared_at", "cleared_by", "clear_reason")
+
+
+def load_notes(path):
+    """Return the "notes" map of the correction notes file at path.
+
+    The file is JSON {"version": 1, "notes": {"LABEL:path": [note, ...]}}.
+    Raises OSError if the file cannot be read (FileNotFoundError when missing) and
+    ValueError unless it is a JSON object with version == 1 and a "notes" object.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError(f"{path} is not a valid notes file") from None
+    if (not isinstance(data, dict) or data.get("version") != 1
+            or not isinstance(data.get("notes"), dict)):
+        raise ValueError(f"{path} is not a valid notes file")
+    return data["notes"]
+
+
+def normalize_notes(value):
+    """Return the valid notes in one notes-map value, each as exactly the 7 note fields.
+
+    A value that is not a list gives []. Items that are not objects, or whose id,
+    text, author or created_at is not a string, are dropped. cleared_at, cleared_by
+    and clear_reason are kept when they are strings, else None.
+    """
+    if not isinstance(value, list):
+        return []
+    notes = []
+    for item in value:
+        if not isinstance(item, dict) or not all(isinstance(item.get(f), str)
+                                                 for f in NOTE_FIELDS):
+            continue
+        note = {f: item[f] for f in NOTE_FIELDS}
+        for field in NOTE_CLEARED_FIELDS:
+            note[field] = item[field] if isinstance(item.get(field), str) else None
+        notes.append(note)
+    return notes
+
+
+def notes_id(key):
+    """Return a summary cache key without its "NAME|" namespace prefix."""
+    head = key.split(":", 1)[0]
+    return key.split("|", 1)[1] if "|" in head else key
 
 
 def header_description(text):
@@ -467,12 +524,14 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos, summaries=None, branch="main", summary_namespace=""):
+def collect(repos, summaries=None, branch="main", summary_namespace="", notes=None):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
     branch is the branch each repo's HEAD is expected to name.
     summary_namespace, when non-empty, prefixes each script's summary_key with "NAME|".
+    notes, when not None, is the "notes" map of a notes file (see load_notes); each
+    script node then gets "notes", its normalized notes sorted by created_at.
     """
     summaries = summaries or {}
     key_prefix = f"{summary_namespace}|" if summary_namespace else ""
@@ -577,7 +636,7 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 type_inferred = inferred is not None
                 script_type = inferred or "Unknown"
 
-            script_nodes.append({
+            node = {
                 "id": node_id,
                 "kind": "script",
                 "repo": label,
@@ -595,7 +654,11 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 "summary_source": summary_source,
                 "summary_generated_at": summary_generated_at,
                 "summary_key": f"{key_prefix}{node_id}",
-            })
+            }
+            if notes is not None:
+                node["notes"] = sorted(normalize_notes(notes.get(node_id)),
+                                       key=lambda note: note["created_at"])
+            script_nodes.append(node)
 
         nodes.extend(script_nodes)
         for record_id in sorted(records):
@@ -653,6 +716,12 @@ def main(argv=None):
     parser.add_argument("--summary-namespace", default="", metavar="NAME",
                         help="script_map_summarize.py --namespace of this page's summaries; "
                              "prefixes each script's summary_key with NAME| (default none)")
+    parser.add_argument("--notes", default=None, metavar="FILE",
+                        help="correction notes file (summary-notes.json); each script node "
+                             "gets its notes")
+    parser.add_argument("--team", action="append", default=None, metavar="NAME",
+                        help="team member name listed on the page (1-40 characters); "
+                             "repeatable")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -729,8 +798,27 @@ def main(argv=None):
             print(f"error: {args.summaries} is not a valid summary cache", file=sys.stderr)
             return 2
 
+    team = set()
+    for value in args.team or []:
+        name = value.strip()
+        if not name or len(name) > 40 or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+            print("error: --team must be 1-40 characters", file=sys.stderr)
+            return 2
+        team.add(name)
+
+    notes = {}
+    if args.notes is not None:
+        try:
+            notes = load_notes(args.notes)
+        except FileNotFoundError:
+            print(f"error: {args.notes} does not exist", file=sys.stderr)
+            return 2
+        except (OSError, ValueError):
+            print(f"error: {args.notes} is not a valid notes file", file=sys.stderr)
+            return 2
+
     try:
-        data = collect(repos, entries, args.branch, args.summary_namespace)
+        data = collect(repos, entries, args.branch, args.summary_namespace, notes=notes)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"
@@ -747,6 +835,7 @@ def main(argv=None):
     data["switch_label"] = args.switch_label or ""
     data["missing_repos"] = args.missing_repo or []
     data["branch"] = args.branch
+    data["team"] = sorted(team, key=lambda s: (s.casefold(), s))
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         page = render(data)
