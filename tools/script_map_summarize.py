@@ -111,6 +111,17 @@ def call_model(api_key, model, system, user, timeout):
     return text
 
 
+def positive_int(value):
+    """argparse type: an integer of at least 1."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be at least 1") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Cache AI summaries of SuiteScript files for script_map.py.")
@@ -120,7 +131,7 @@ def main(argv=None):
     parser.add_argument("--cache", required=True, help="summary cache JSON file")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help=f"model name (default {DEFAULT_MODEL})")
-    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
+    parser.add_argument("--max-chars", type=positive_int, default=DEFAULT_MAX_CHARS,
                         help=f"characters of code sent per file (default {DEFAULT_MAX_CHARS})")
     try:
         args = parser.parse_args(argv)

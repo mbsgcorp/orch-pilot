@@ -137,6 +137,18 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--repo", err)
 
+    def test_max_chars_must_be_positive(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for value in ("0", "-5"):
+            with self.subTest(value=value):
+                code, out, err, call = self.run_main(
+                    self.args(("A", repo)) + ["--max-chars", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("--max-chars", err)
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
     def test_missing_api_key(self):
         repo = self.make_repo("a", {"ue.js": USER_EVENT})
         for key in (None, ""):
