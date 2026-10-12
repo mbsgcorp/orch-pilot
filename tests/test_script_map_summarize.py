@@ -909,9 +909,19 @@ class SummarizeTest(unittest.TestCase):
         entries = self.read_cache()["entries"]
         fresh = entries["A:ue.js"]
         self.assertEqual(fresh["summary"], "Right.")
+        old_summaries = {"A:ue.js": "Wrong.", "B:copy.js": "Wrong copy.",
+                         "sandbox|A:ue.js": "Wrong sandbox."}
         for key in ("B:copy.js", "sandbox|A:ue.js"):
             with self.subTest(key=key):
-                self.assertEqual(entries[key], fresh)
+                # Every shared field matches; history comes from each entry's own old values.
+                self.assertEqual({k: v for k, v in entries[key].items() if k != "history"},
+                                 {k: v for k, v in fresh.items() if k != "history"})
+                self.assertEqual(set(entries[key]), set(fresh))
+        for key, summary in old_summaries.items():
+            with self.subTest(history=key):
+                self.assertEqual(entries[key]["history"], [
+                    {"summary": summary, "generated_at": "2026-01-01T00:00:00Z",
+                     "trigger": "", "author": "", "guidance": ""}])
         self.assertEqual(entries["C:other.js"], other)
         self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
                               f"0 deferred, 0 pruned -> {self.cache}\n")
@@ -929,7 +939,14 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         entries = self.read_cache()["entries"]
         self.assertEqual(entries["A:ue.js"]["summary"], "Right.")
-        self.assertEqual(entries["A:ue.js"], entries["sandbox|A:ue.js"])
+        self.assertEqual({k: v for k, v in entries["A:ue.js"].items() if k != "history"},
+                         {k: v for k, v in entries["sandbox|A:ue.js"].items()
+                          if k != "history"})
+        self.assertEqual(set(entries["A:ue.js"]), set(entries["sandbox|A:ue.js"]))
+        for key, summary in (("A:ue.js", "Wrong prod."), ("sandbox|A:ue.js", "Wrong.")):
+            self.assertEqual(entries[key]["history"], [
+                {"summary": summary, "generated_at": "2026-01-01T00:00:00Z",
+                 "trigger": "", "author": "", "guidance": ""}])
 
     def test_force_failure_keeps_old_entry_and_counts_failed(self):
         repo = self.make_repo("a", {"ue.js": USER_EVENT})
@@ -999,6 +1016,382 @@ class SummarizeTest(unittest.TestCase):
                       err)
         self.assertEqual(self.read_cache()["entries"], {"A:f0.js": cached})
         self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 5 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    # --regen-details, trigger, author, guidance and history
+
+    UE_PROMPT = (script_map_summarize.SYSTEM_PROMPT
+                 + "\n\nFile: ue.js\nScript type: UserEventScript\n\n" + USER_EVENT)
+
+    def write_details(self, requests, name="details.json", version=1):
+        path = self.root / name
+        path.write_text(json.dumps({"version": version, "requests": requests}),
+                        encoding="utf-8")
+        return path
+
+    def request(self, guidance="Mention the hold record.", author="Kim"):
+        return {"requested_at": "2026-10-12T10:00:00Z", "author": author, "guidance": guidance}
+
+    def item(self, summary, trigger="", author="", guidance="",
+             generated_at="2026-01-01T00:00:00Z"):
+        return {"summary": summary, "generated_at": generated_at, "trigger": trigger,
+                "author": author, "guidance": guidance}
+
+    def test_help_mentions_regen_details_and_new_fields(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ("--regen-details", "trigger", "author", "guidance", "history"):
+            self.assertIn(text, result.stdout)
+        doc = script_map_summarize.__doc__
+        for text in ("--regen-details", '"trigger"', '"author"', '"guidance"', '"history"',
+                     script_map_summarize.GUIDANCE_HEADING.split(";")[0]):
+            self.assertIn(text, doc)
+
+    def test_regen_details_missing_file(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        missing = self.root / "missing.json"
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--regen-details", str(missing)])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, f"error: {missing} does not exist\n")
+        self.assertEqual(out, "")
+        call.assert_not_called()
+        self.assertFalse(self.cache.exists())
+
+    def test_regen_details_invalid_files(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        bad_json = self.root / "bad.json"
+        bad_json.write_text("{not json", encoding="utf-8")
+        not_utf8 = self.root / "bin.json"
+        not_utf8.write_bytes(b"\xff\xfe{")
+        not_object = self.root / "list.json"
+        not_object.write_text("[1]", encoding="utf-8")
+        no_version = self.root / "noversion.json"
+        no_version.write_text(json.dumps({"requests": {}}), encoding="utf-8")
+        paths = [bad_json, not_utf8, not_object, no_version,
+                 self.write_details({}, "v2.json", version=2)]
+        for name, requests in (("list.json2", []), ("none.json", None), ("str.json", "x")):
+            path = self.root / name
+            path.write_text(json.dumps({"version": 1, "requests": requests}), encoding="utf-8")
+            paths.append(path)
+        old = self.entry(self.sha(repo / "ue.js"))
+        self.write_cache({"A:ue.js": old})
+        for path in paths:
+            with self.subTest(path=path.name):
+                code, out, err, call = self.run_main(
+                    self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(err, f"error: {path} is not a valid regenerate details file\n")
+                self.assertEqual(out, "")
+                call.assert_not_called()
+                self.assertEqual(self.read_cache()["entries"], {"A:ue.js": old})
+
+    def test_regen_details_malformed_requests_ignored(self):
+        details = self.write_details({
+            "A:ok.js": self.request(),
+            "A:list.js": ["x"],
+            "A:str.js": "guidance",
+            "A:noauthor.js": {"requested_at": "t", "guidance": "g"},
+            "A:numauthor.js": {"requested_at": "t", "author": 5, "guidance": "g"},
+            "A:noguidance.js": {"requested_at": "t", "author": "a"},
+            "A:nulltime.js": {"requested_at": None, "author": "a", "guidance": "g"},
+        })
+        self.assertEqual(script_map_summarize.load_regen_details(details),
+                         {"A:ok.js": self.request()})
+
+    def test_regen_details_malformed_entry_treated_as_absent(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        details = self.write_details({"A:ue.js": {"requested_at": "t", "author": "Kim",
+                                                  "guidance": 5}})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_args.args[1], self.UE_PROMPT)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual((entry["trigger"], entry["author"], entry["guidance"]),
+                         ("regenerate", "", ""))
+
+    def test_forced_prompt_with_guidance(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"A:ue.js": self.entry(self.sha(repo / "ue.js"))})
+        guidance = "  Mention the hold.\nIt runs on create.\r\nNot edit.\rDone.  \n"
+        details = self.write_details({"A:ue.js": self.request(guidance, author="Kim Lee")})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args[1], self.UE_PROMPT + "\n\n"
+                         "Guidance from the MBSG team for this run. Check it against the code; "
+                         "if the code contradicts it, follow the code:\n"
+                         "Mention the hold. It runs on create. Not edit. Done.")
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual(entry["trigger"], "regenerate")
+        self.assertEqual(entry["author"], "Kim Lee")
+        self.assertEqual(entry["guidance"],
+                         "Mention the hold.\nIt runs on create.\r\nNot edit.\rDone.")
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_prompt_unchanged_without_forced_guidance(self):
+        cases = {
+            "unforced key with details": ([], {"A:ue.js": self.request()}),
+            "forced key without entry": (["--force", "A:ue.js"],
+                                         {"A:other.js": self.request()}),
+            "forced key blank guidance": (["--force", "A:ue.js"],
+                                          {"A:ue.js": self.request(" \n\t ")}),
+            "forced key empty guidance": (["--force", "A:ue.js"],
+                                          {"A:ue.js": self.request("")}),
+            "forced key no details file": (["--force", "A:ue.js"], None),
+            "unforced no details file": ([], None),
+        }
+        for index, (name, (force, requests)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                repo = self.make_repo(f"r{index}", {"ue.js": USER_EVENT})
+                if force:
+                    self.write_cache({"A:ue.js": self.entry(self.sha(repo / "ue.js"))})
+                else:
+                    self.write_cache({})
+                argv = self.args(("A", repo)) + force
+                if requests is not None:
+                    argv += ["--regen-details", str(self.write_details(requests))]
+                code, out, err, call = self.run_main(argv)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(call.call_count, 1)
+                self.assertEqual(call.call_args.args[1], self.UE_PROMPT)
+                entry = self.read_cache()["entries"]["A:ue.js"]
+                expected_author = "Kim" if name in ("forced key blank guidance",
+                                                    "forced key empty guidance") else ""
+                self.assertEqual((entry["author"], entry["guidance"]), (expected_author, ""))
+                self.assertEqual(entry["trigger"], "regenerate" if force else "first")
+
+    def test_guidance_not_used_on_later_unforced_run(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"A:ue.js": self.entry(self.sha(repo / "ue.js"))})
+        details = self.write_details({"A:ue.js": self.request("Use this once.")})
+        code, _, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)],
+            reply="Guided.")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Use this once.", call.call_args.args[1])
+        changed = USER_EVENT + "// changed\n"
+        self.write(repo, "ue.js", changed)
+        code, _, err, call = self.run_main(
+            self.args(("A", repo)) + ["--regen-details", str(details)], reply="Changed.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args[1], script_map_summarize.SYSTEM_PROMPT
+                         + "\n\nFile: ue.js\nScript type: UserEventScript\n\n" + changed)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual((entry["trigger"], entry["author"], entry["guidance"]),
+                         ("code_changed", "", ""))
+        self.assertEqual(entry["history"][0]["trigger"], "regenerate")
+        self.assertEqual(entry["history"][0]["guidance"], "Use this once.")
+        # A forced run without --regen-details has empty author and guidance.
+        code, _, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js"], reply="Forced.")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Guidance from the MBSG team", call.call_args.args[1])
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual((entry["trigger"], entry["author"], entry["guidance"]),
+                         ("regenerate", "", ""))
+
+    def test_trigger_first_and_code_changed(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "new.js": SUITELET})
+        old = dict(self.entry("0" * 64, "Old."), trigger="first")
+        self.write_cache({"A:ue.js": old, "A:notdict.js": "x"})
+        code, out, err, call = self.run_main(self.args(("A", repo)),
+                                             reply=["New.", "Changed."])
+        self.assertEqual(code, 0, err)
+        entries = self.read_cache()["entries"]
+        new = entries["A:new.js"]
+        self.assertEqual(new, {"sha256": self.sha(repo / "new.js"), "summary": "New.",
+                               "model": COMMAND, "generated_at": new["generated_at"],
+                               "trigger": "first", "author": "", "guidance": "",
+                               "history": []})
+        changed = entries["A:ue.js"]
+        self.assertEqual(changed["trigger"], "code_changed")
+        self.assertEqual((changed["author"], changed["guidance"]), ("", ""))
+        self.assertEqual(changed["history"], [self.item("Old.", "first")])
+
+    def test_trigger_first_when_old_value_not_dict(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"A:ue.js": "not a dict"})
+        code, _, err, _ = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual((entry["trigger"], entry["history"]), ("first", []))
+
+    def test_trigger_regenerate(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"A:ue.js": self.entry(self.sha(repo / "ue.js"), "Wrong.")})
+        details = self.write_details({"A:ue.js": self.request("  Be brief.  ")})
+        code, _, err, _ = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual({k: v for k, v in entry.items() if k != "generated_at"}, {
+            "sha256": self.sha(repo / "ue.js"), "summary": "Right.", "model": COMMAND,
+            "trigger": "regenerate", "author": "Kim", "guidance": "Be brief.",
+            "history": [self.item("Wrong.")]})
+
+    def test_trigger_reused_new_key_and_existing_key(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "copy.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        source = dict(self.entry(sha, "Shared.", model="codex"), trigger="regenerate",
+                      author="Kim", guidance="G.", history=[self.item("Older.")])
+        old_copy = dict(self.entry("0" * 64, "Old copy."), trigger="code_changed",
+                        history=[self.item("Oldest copy.", "first")])
+        self.write_cache({"B:src.js": source, "A:copy.js": old_copy})
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        entries = self.read_cache()["entries"]
+        new_key = entries["A:ue.js"]
+        self.assertEqual({k: v for k, v in new_key.items() if k != "generated_at"}, {
+            "sha256": sha, "summary": "Shared.", "model": "codex", "trigger": "reused",
+            "author": "", "guidance": "", "history": []})
+        existing = entries["A:copy.js"]
+        self.assertEqual((existing["summary"], existing["trigger"], existing["author"],
+                          existing["guidance"]), ("Shared.", "reused", "", ""))
+        self.assertEqual(existing["history"], [self.item("Old copy.", "code_changed"),
+                                               self.item("Oldest copy.", "first")])
+        self.assertEqual(entries["B:src.js"], source)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_history_order_and_cap_across_forced_runs(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({})
+        code, _, err, _ = self.run_main(self.args(("A", repo)), reply="S0.")
+        self.assertEqual(code, 0, err)
+        stamps = ["2026-01-01T00:00:00Z"]
+        for i in range(1, 8):
+            details = self.write_details({"A:ue.js": self.request(f"G{i}.", f"P{i}")})
+            # Distinct generated_at values make the order visible.
+            stamp = f"2026-01-0{i + 1}T00:00:00Z"
+            with mock.patch.object(script_map_summarize, "datetime") as fake:
+                fake.now.return_value.strftime.return_value = stamp
+                code, _, err, _ = self.run_main(
+                    self.args(("A", repo)) + ["--force", "A:ue.js",
+                                              "--regen-details", str(details)],
+                    reply=f"S{i}.")
+            self.assertEqual(code, 0, err)
+            stamps.append(stamp)
+            entry = self.read_cache()["entries"]["A:ue.js"]
+            self.assertEqual(len(entry["history"]), min(i, 5))
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual(entry["summary"], "S7.")
+        self.assertEqual((entry["author"], entry["guidance"]), ("P7", "G7."))
+        expected = [self.item(f"S{i}.", "regenerate", f"P{i}", f"G{i}.", stamps[i])
+                    for i in (6, 5, 4, 3, 2)]
+        self.assertEqual(entry["history"], expected)
+
+    def test_history_from_legacy_and_malformed_items(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        legacy = {"sha256": self.sha(repo / "ue.js"), "summary": "Legacy.", "model": "m"}
+        old = dict(self.entry(self.sha(repo / "ue.js"), "Old."), trigger=7, author=None,
+                   history=["bad", None, 3, [],
+                            {"summary": "H1.", "trigger": "first", "author": 9},
+                            self.item("H2.", "code_changed"),
+                            self.item("H3."), self.item("H4."), self.item("H5.")])
+        self.write_cache({"A:ue.js": legacy, "B:ue.js": old})
+        code, _, err, _ = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js"], reply="Right.")
+        self.assertEqual(code, 0, err)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["history"], [
+            {"summary": "Legacy.", "generated_at": "", "trigger": "", "author": "",
+             "guidance": ""}])
+        # Propagated entry: own old values (non-strings -> ""), malformed items dropped, cap 5.
+        self.assertEqual(entries["B:ue.js"]["history"], [
+            self.item("Old."),
+            {"summary": "H1.", "generated_at": "", "trigger": "first", "author": "",
+             "guidance": ""},
+            self.item("H2.", "code_changed"), self.item("H3."), self.item("H4.")])
+
+    def test_history_through_propagation(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        own = dict(self.entry(sha, "Own old."), trigger="first", history=[])
+        copy = dict(self.entry(sha, "Copy old.", model="old"), trigger="reused",
+                    history=[self.item("Copy older.", "first")])
+        sandbox = dict(self.entry(sha, "Sandbox old."), trigger="regenerate", author="Lee",
+                       guidance="Old G.",
+                       history=[self.item(f"SB{i}.") for i in range(5)])
+        other = self.entry("1" * 64, "Unrelated.")
+        self.write_cache({"A:ue.js": own, "B:copy.js": copy, "sandbox|A:ue.js": sandbox,
+                          "C:other.js": other})
+        details = self.write_details({"A:ue.js": self.request("New G.", "Kim")})
+        code, _, err, _ = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        entries = self.read_cache()["entries"]
+        fresh = entries["A:ue.js"]
+        for key in ("B:copy.js", "sandbox|A:ue.js"):
+            with self.subTest(key=key):
+                for field in ("sha256", "summary", "model", "generated_at", "trigger",
+                              "author", "guidance"):
+                    self.assertEqual(entries[key][field], fresh[field])
+        self.assertEqual((fresh["trigger"], fresh["author"], fresh["guidance"]),
+                         ("regenerate", "Kim", "New G."))
+        self.assertEqual(fresh["history"], [self.item("Own old.", "first")])
+        self.assertEqual(entries["B:copy.js"]["history"], [
+            self.item("Copy old.", "reused"), self.item("Copy older.", "first")])
+        self.assertEqual(entries["sandbox|A:ue.js"]["history"], [
+            self.item("Sandbox old.", "regenerate", "Lee", "Old G."),
+            self.item("SB0."), self.item("SB1."), self.item("SB2."), self.item("SB3.")])
+        self.assertEqual(entries["C:other.js"], other)
+
+    def test_legacy_cache_causes_no_regeneration(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "copy.js": USER_EVENT,
+                                    "s.js": SUITELET, "gone.js": SUITELET + "// g\n"})
+        legacy = {
+            "A:ue.js": self.entry(self.sha(repo / "ue.js"), "UE."),
+            "A:s.js": {"sha256": self.sha(repo / "s.js"), "summary": "S."},
+            "A:old.js": self.entry("2" * 64, "Pruned."),
+            "B:gone.js": self.entry(self.sha(repo / "gone.js"), "Gone."),
+        }
+        self.write_cache(legacy)
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        # Same counts as before the change: 2 cached, 2 reused (copy.js, gone.js), 1 pruned.
+        self.assertEqual(out, f"script_map_summarize: 2 cached, 2 reused, 0 new, 0 failed, "
+                              f"0 deferred, 1 pruned -> {self.cache}\n")
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"], legacy["A:ue.js"])
+        self.assertEqual(entries["A:s.js"], legacy["A:s.js"])
+        self.assertEqual(entries["B:gone.js"], legacy["B:gone.js"])
+        self.assertNotIn("A:old.js", entries)
+        # A second run over the now-mixed cache is all cached.
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(out, f"script_map_summarize: 4 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_failed_forced_run_keeps_entry_and_history(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        old = dict(self.entry(sha, "Wrong."), trigger="code_changed", author="",
+                   guidance="", history=[self.item("Older.", "first")])
+        copy = dict(self.entry(sha, "Copy."), trigger="reused", author="", guidance="",
+                    history=[self.item("Copy older.")])
+        self.write_cache({"A:ue.js": old, "B:ue.js": copy})
+        details = self.write_details({"A:ue.js": self.request()})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:ue.js", "--regen-details", str(details)],
+            reply=fail)
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(err, "warning: A:ue.js summary failed: exit 1\n")
+        self.assertEqual(self.read_cache()["entries"], {"A:ue.js": old, "B:ue.js": copy})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 1 failed, "
                               f"0 deferred, 0 pruned -> {self.cache}\n")
 
 
