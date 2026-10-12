@@ -570,11 +570,12 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 summary, summary_source = cached["summary"], "ai"
                 if isinstance(cached.get("generated_at"), str):
                     summary_generated_at = cached["generated_at"]
-                details = history_item(cached)
-                summary_trigger = details["trigger"]
-                summary_author = details["author"]
-                summary_guidance = details["guidance"]
-                summary_history = normalize_history(cached.get("history"))
+                if summary:
+                    details = history_item(cached)
+                    summary_trigger = details["trigger"]
+                    summary_author = details["author"]
+                    summary_guidance = details["guidance"]
+                    summary_history = normalize_history(cached.get("history"))
             else:
                 summary = header_description(text)
                 summary_source = "header" if summary else ""

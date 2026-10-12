@@ -1091,6 +1091,23 @@ var u = 'CUSTOMRECORD99';
         no_cache = self.scripts(self.collect_one(repo))["none.js"]
         self.assertEqual(self.summary_details(no_cache), ("", "", "", []))
 
+    def test_summary_details_empty_for_empty_cached_summary(self):
+        repo = self.make_repo("a")
+        own = self.write("a/own.js", USER_EVENT)
+        moved = self.write("a/moved.js", USER_EVENT.replace("DEPLOY ON", "// x\n * DEPLOY ON"))
+        own_sha = hashlib.sha256(own.read_bytes()).hexdigest()
+        moved_sha = hashlib.sha256(moved.read_bytes()).hexdigest()
+        full = {"trigger": "regenerate", "author": "Kim", "guidance": "G.",
+                "history": [self.history_item("Old.", "first")]}
+        entries = {"A:own.js": dict(self.summary_entry(own_sha, ""), **full),
+                   "B:moved.js": dict(self.summary_entry(moved_sha, ""), **full),
+                   "A:moved.js": dict(self.summary_entry("0" * 64, "Stale."), **full)}
+        nodes = self.scripts(script_map.collect([("A", repo)], entries))
+        for name in ("own.js", "moved.js"):
+            with self.subTest(name=name):
+                self.assertEqual(nodes[name]["summary"], "")
+                self.assertEqual(self.summary_details(nodes[name]), ("", "", "", []))
+
     def test_summary_details_non_string_and_malformed_history(self):
         repo = self.make_repo("a")
         ai = self.write("a/ai.js", USER_EVENT)
