@@ -190,6 +190,19 @@ main { padding: 12px 16px; }
 #i-list dt, #rec-list dt { font-weight: 600; margin-top: 6px; }
 #i-list dd, #rec-list dd { margin: 2px 0 0; word-break: break-word; }
 #i-list dd ul, #rec-list dd ul { margin: 0; padding-left: 18px; }
+.regen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
+.regen button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.regen button:disabled { cursor: default; opacity: 0.6; }
+.regen-status { color: var(--muted); font-size: 12px; }
 #rec-missing { margin-bottom: 8px; }
 #rec-cards {
     display: grid;
@@ -694,6 +707,54 @@ main { padding: 12px 16px; }
         return ul;
     }
 
+    function regenerateControl(s) {
+        var wrap = el('div', 'regen');
+        var button = el('button', null, 'Regenerate summary');
+        button.type = 'button';
+        var status = el('span', 'regen-status');
+        status.setAttribute('role', 'status');
+        wrap.appendChild(button);
+        wrap.appendChild(status);
+        function failed(text) {
+            status.textContent = text;
+            button.disabled = false;
+        }
+        button.addEventListener('click', function () {
+            button.disabled = true;
+            status.textContent = '';
+            fetch(refreshUrl, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ key: s.summary_key })
+            }).then(function (res) {
+                if (res.status === 202) {
+                    status.textContent =
+                        'Regeneration requested. New summary in about 10 minutes, then reload this page.';
+                    return;
+                }
+                if (res.status !== 429) {
+                    failed('Request failed (HTTP ' + res.status + ').');
+                    return;
+                }
+                return res.json().then(function (body) {
+                    var when = Date.parse(body && typeof body.requested_at === 'string' ?
+                        body.requested_at : '');
+                    if (isNaN(when)) {
+                        failed('Request failed (network error).');
+                        return;
+                    }
+                    failed('Already requested at ' + hhmm(when) + ' UTC. Try again after ' +
+                        hhmm(when + 600000) + ' UTC.');
+                }, function () {
+                    failed('Request failed (network error).');
+                });
+            }).catch(function () {
+                failed('Request failed (network error).');
+            });
+        });
+        return wrap;
+    }
+
     function scriptEntry(s) {
         var details = el('details');
         details.setAttribute('data-id', s.id);
@@ -716,7 +777,13 @@ main { padding: 12px 16px; }
         } else {
             about.appendChild(el('span', 'empty', 'No description'));
         }
-        addField(dl, 'Summary', about);
+        var summaryValue = about;
+        if (refreshUrl) {
+            summaryValue = el('div');
+            summaryValue.appendChild(about);
+            summaryValue.appendChild(regenerateControl(s));
+        }
+        addField(dl, 'Summary', summaryValue);
         addField(dl, 'Type', s.type + (s.type_inferred ? ' (inferred from folder)' : ''));
         addField(dl, 'Entry points', s.entry_points.length ? s.entry_points.join(', ') : 'none');
         addField(dl, 'N/ modules', s.modules.length ? s.modules.join(', ') : 'none');

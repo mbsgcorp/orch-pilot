@@ -1,10 +1,18 @@
 // Netlify Function: record a "rebuild requested" file on a branch of the site repo.
 // Hermes polls that branch and rebuilds the script map; requests are limited to one
 // per 10 minutes. Uses only Node built-ins (fetch, Response, Buffer, crypto).
+//
+// A POST whose body is {"key": "[NS|]LABEL:path"} instead records a per-script
+// "regenerate summary" request in RESUMMARIZE_PATH on the same branch, as
+// {"version": 1, "requests": {"<key>": "<iso>"}}, limited to one per key per 10
+// minutes. Entries older than 7 days are dropped and at most 500 are kept.
 
 export const config = { path: "/api/rebuild" };
 
 const MIN_INTERVAL_MS = 10 * 60 * 1000;
+const MAX_REQUEST_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_REQUESTS = 500;
+const KEY_RE = /^(?:[A-Za-z0-9_-]+\|)?[^|:\r\n]{1,100}:[^\r\n]{1,300}$/;
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -37,6 +45,32 @@ export default async (req) => {
     "User-Agent": "mbsg-script-map",
   };
   const url = `https://api.github.com/repos/${repo}/contents/${path}`;
+
+  let text;
+  try {
+    text = await req.text();
+  } catch {
+    return json(400, { status: "bad_request" });
+  }
+  if (text !== "") {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+        typeof parsed.key !== "string" || !KEY_RE.test(parsed.key)) {
+      return json(400, { status: "bad_request" });
+    }
+    const resummarizePath = process.env.RESUMMARIZE_PATH || "resummarize-requests.json";
+    return requestResummarize(parsed.key, {
+      token,
+      branch,
+      headers,
+      url: `https://api.github.com/repos/${repo}/contents/${resummarizePath}`,
+    });
+  }
 
   try {
     const getRes = await fetch(url + "?ref=" + encodeURIComponent(branch), { method: "GET", headers });
@@ -82,3 +116,71 @@ export default async (req) => {
     return json(502, { status: "error", error: "github " + message });
   }
 };
+
+async function requestResummarize(key, { token, branch, headers, url }) {
+  try {
+    const getRes = await fetch(url + "?ref=" + encodeURIComponent(branch), { method: "GET", headers });
+    let sha = null;
+    let requests = {};
+    if (getRes.status === 200) {
+      const body = await getRes.json();
+      sha = body.sha;
+      let prior = null;
+      try {
+        prior = JSON.parse(Buffer.from(body.content, "base64").toString("utf8"));
+      } catch {
+        prior = null;
+      }
+      const priorRequests = prior && typeof prior === "object" ? prior.requests : null;
+      if (priorRequests && typeof priorRequests === "object" && !Array.isArray(priorRequests)) {
+        requests = priorRequests;
+      }
+    } else if (getRes.status !== 404) {
+      return json(502, { status: "error", error: "github " + getRes.status });
+    }
+
+    const now = Date.now();
+    const requestedAt = Object.prototype.hasOwnProperty.call(requests, key) &&
+      typeof requests[key] === "string" ? requests[key] : null;
+    const t = requestedAt === null ? NaN : Date.parse(requestedAt);
+    if (!Number.isNaN(t) && now - t < MIN_INTERVAL_MS) {
+      return json(429, { status: "too_soon", requested_at: requestedAt });
+    }
+
+    const iso = nowIso();
+    const kept = [[key, iso, Date.parse(iso)]];
+    for (const k of Object.keys(requests)) {
+      const value = requests[k];
+      const when = typeof value === "string" ? Date.parse(value) : NaN;
+      if (k !== key && !Number.isNaN(when) && now - when <= MAX_REQUEST_AGE_MS) {
+        kept.push([k, value, when]);
+      }
+    }
+    kept.sort((a, b) => b[2] - a[2]);
+    const next = {};
+    for (const [k, value] of kept.slice(0, MAX_REQUESTS)) {
+      next[k] = value;
+    }
+
+    const content = Buffer.from(
+      JSON.stringify({ version: 1, requests: next }),
+      "utf8",
+    ).toString("base64");
+    const putBody = { message: "resummarize requested " + iso, content, branch };
+    if (sha) {
+      putBody.sha = sha;
+    }
+    const putRes = await fetch(url, {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(putBody),
+    });
+    if (putRes.status === 200 || putRes.status === 201) {
+      return json(202, { status: "requested", key, requested_at: iso });
+    }
+    return json(502, { status: "error", error: "github " + putRes.status });
+  } catch (err) {
+    const message = String((err && err.message) || err).split(token).join("***");
+    return json(502, { status: "error", error: "github " + message });
+  }
+}

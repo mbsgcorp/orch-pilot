@@ -217,3 +217,257 @@ test("fetch throwing: 502 with message, token not leaked", async () => {
   assert.equal(body.status, "error");
   assert.match(body.error, /^github connect failed/);
 });
+
+// Per-script "regenerate summary" requests: POST {"key": "[NS|]LABEL:path"}.
+
+const RESUMMARIZE_URL = "https://api.github.com/repos/o/r/contents/resummarize-requests.json";
+
+function postBody(text) {
+  return new Request("http://localhost/api/rebuild", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: text,
+  });
+}
+
+function postKey(key) {
+  return postBody(JSON.stringify({ key }));
+}
+
+function isoMinutesAgo(minutes) {
+  return new Date(Date.now() - minutes * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function resummarizeFile(requests) {
+  const content = Buffer.from(JSON.stringify({ version: 1, requests })).toString("base64");
+  return { sha: "def", content };
+}
+
+function resummarizePut(call) {
+  assert.equal(call.init.method, "PUT");
+  assert.equal(call.url, RESUMMARIZE_URL);
+  const put = JSON.parse(call.init.body);
+  put.file = JSON.parse(Buffer.from(put.content, "base64").toString("utf8"));
+  return put;
+}
+
+test("key request: invalid bodies give 400 with no GitHub calls", async () => {
+  const bodies = [
+    "not json{",
+    "null",
+    "[]",
+    '"A:x.js"',
+    "42",
+    "{}",
+    JSON.stringify({ key: 5 }),
+    JSON.stringify({ key: null }),
+    JSON.stringify({ key: "" }),
+    JSON.stringify({ key: "no-colon" }),
+    JSON.stringify({ key: "A:" }),
+    JSON.stringify({ key: ":x.js" }),
+    JSON.stringify({ key: "bad ns|A:x.js" }),
+    JSON.stringify({ key: "a|b|A:x.js" }),
+    JSON.stringify({ key: "A:x.js\nmore" }),
+    JSON.stringify({ key: "A:x.js\r" }),
+    JSON.stringify({ key: "A".repeat(101) + ":x.js" }),
+    JSON.stringify({ key: "A:" + "x".repeat(301) }),
+    " ",
+  ];
+  for (const text of bodies) {
+    configure();
+    const calls = fakeFetch([]);
+    const res = await handler(postBody(text));
+    assert.equal(res.status, 400, text);
+    assert.deepEqual(await read(res), { status: "bad_request" });
+    assert.equal(calls.length, 0, text);
+  }
+});
+
+test("key request: no file, PUT without sha, 202 with key", async () => {
+  configure();
+  const key = "sandbox|RTMH:Sub Dir/ue.js";
+  const calls = fakeFetch([jsonResponse(404, { message: "Not Found" }), jsonResponse(201, {})]);
+  const res = await handler(postKey(key));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  assert.deepEqual(Object.keys(body).sort(), ["key", "requested_at", "status"]);
+  assertRequested(body);
+  assert.equal(body.key, key);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].url, RESUMMARIZE_URL + "?ref=rebuild-requests");
+  const put = resummarizePut(calls[1]);
+  assert.ok(!("sha" in put));
+  assert.equal(put.branch, "rebuild-requests");
+  assert.equal(put.message, "resummarize requested " + body.requested_at);
+  assert.deepEqual(put.file, { version: 1, requests: { [key]: body.requested_at } });
+  for (const call of calls) {
+    const h = new Headers(call.init.headers);
+    assert.equal(h.get("authorization"), "Bearer " + TOKEN);
+    assert.equal(h.get("accept"), "application/vnd.github+json");
+    assert.equal(h.get("x-github-api-version"), "2022-11-28");
+    assert.equal(h.get("user-agent"), "mbsg-script-map");
+  }
+});
+
+test("key request: custom RESUMMARIZE_PATH and branch are used", async () => {
+  setEnv({ GITHUB_TOKEN: TOKEN, REBUILD_REPO: "o/r", REBUILD_BRANCH: "b x" });
+  process.env.RESUMMARIZE_PATH = "dir/r.json";
+  try {
+    const calls = fakeFetch([jsonResponse(404, {}), jsonResponse(200, {})]);
+    const res = await handler(postKey("A:x.js"));
+    assert.equal(res.status, 202);
+    assert.equal(calls[0].url, "https://api.github.com/repos/o/r/contents/dir/r.json?ref=b%20x");
+    assert.equal(calls[1].url, "https://api.github.com/repos/o/r/contents/dir/r.json");
+    assert.equal(JSON.parse(calls[1].init.body).branch, "b x");
+  } finally {
+    delete process.env.RESUMMARIZE_PATH;
+  }
+});
+
+test("key request: same key 3 minutes old gives 429 and no PUT", async () => {
+  configure();
+  const iso = isoMinutesAgo(3);
+  const calls = fakeFetch([jsonResponse(200, resummarizeFile({ "A:x.js": iso }))]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 429);
+  assert.deepEqual(await read(res), { status: "too_soon", requested_at: iso });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("key request: same key in the future gives 429", async () => {
+  configure();
+  const calls = fakeFetch([jsonResponse(200, resummarizeFile({ "A:x.js": isoMinutesAgo(-5) }))]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 429);
+  assert.equal(calls.length, 1);
+});
+
+test("key request: same key 11 minutes old, PUT with sha, 202", async () => {
+  configure();
+  const calls = fakeFetch([
+    jsonResponse(200, resummarizeFile({ "A:x.js": isoMinutesAgo(11) })),
+    jsonResponse(200, {}),
+  ]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  const put = resummarizePut(calls[1]);
+  assert.equal(put.sha, "def");
+  assert.deepEqual(put.file.requests, { "A:x.js": body.requested_at });
+});
+
+test("key request: a different key while another is recent gives 202", async () => {
+  configure();
+  const recent = isoMinutesAgo(2);
+  const calls = fakeFetch([
+    jsonResponse(200, resummarizeFile({ "A:x.js": recent })),
+    jsonResponse(200, {}),
+  ]);
+  const res = await handler(postKey("sandbox|A:x.js"));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  assert.equal(body.key, "sandbox|A:x.js");
+  const put = resummarizePut(calls[1]);
+  assert.equal(put.sha, "def");
+  assert.deepEqual(put.file.requests, { "A:x.js": recent, "sandbox|A:x.js": body.requested_at });
+});
+
+test("key request: entries older than 7 days are dropped", async () => {
+  configure();
+  const fresh = isoMinutesAgo(60 * 24 * 6);
+  const calls = fakeFetch([
+    jsonResponse(200, resummarizeFile({
+      "A:old.js": isoMinutesAgo(60 * 24 * 7 + 1),
+      "A:fresh.js": fresh,
+      "A:bad.js": "not a date",
+      "A:num.js": 5,
+    })),
+    jsonResponse(201, {}),
+  ]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  assert.deepEqual(resummarizePut(calls[1]).file.requests,
+    { "A:fresh.js": fresh, "A:x.js": body.requested_at });
+});
+
+test("key request: at most 500 newest entries are kept", async () => {
+  configure();
+  const requests = {};
+  for (let i = 0; i < 600; i++) {
+    requests["A:f" + i + ".js"] = isoMinutesAgo(11 + i);
+  }
+  const calls = fakeFetch([jsonResponse(200, resummarizeFile(requests)), jsonResponse(201, {})]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  const kept = resummarizePut(calls[1]).file.requests;
+  assert.equal(Object.keys(kept).length, 500);
+  assert.equal(kept["A:x.js"], body.requested_at);
+  for (let i = 0; i < 499; i++) {
+    assert.equal(kept["A:f" + i + ".js"], requests["A:f" + i + ".js"]);
+  }
+  assert.ok(!("A:f499.js" in kept));
+  assert.ok(!("A:f599.js" in kept));
+});
+
+test("key request: unparseable file, PUT with sha, 202", async () => {
+  configure();
+  for (const text of ["not json{", "[1]", '{"version":1,"requests":[]}', "null"]) {
+    const file = { sha: "def", content: Buffer.from(text).toString("base64") };
+    const calls = fakeFetch([jsonResponse(200, file), jsonResponse(201, {})]);
+    const res = await handler(postKey("A:x.js"));
+    assert.equal(res.status, 202, text);
+    const body = await read(res);
+    const put = resummarizePut(calls[1]);
+    assert.equal(put.sha, "def");
+    assert.deepEqual(put.file, { version: 1, requests: { "A:x.js": body.requested_at } });
+  }
+});
+
+test("key request: GitHub 500 on GET gives 502, no PUT", async () => {
+  configure();
+  const calls = fakeFetch([jsonResponse(500, {})]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 502);
+  assert.deepEqual(await read(res), { status: "error", error: "github 500" });
+  assert.equal(calls.length, 1);
+});
+
+test("key request: PUT returning 409 gives 502", async () => {
+  configure();
+  const calls = fakeFetch([jsonResponse(404, {}), jsonResponse(409, {})]);
+  const res = await handler(postKey("A:x.js"));
+  assert.equal(res.status, 502);
+  assert.deepEqual(await read(res), { status: "error", error: "github 409" });
+  assert.equal(calls.length, 2);
+});
+
+test("key request: fetch throwing gives 502, token not leaked", async () => {
+  configure();
+  for (const replies of [
+    [() => { throw new Error("connect failed " + TOKEN); }],
+    [jsonResponse(404, {}), () => { throw new Error("put failed " + TOKEN); }],
+  ]) {
+    fakeFetch(replies);
+    const res = await handler(postKey("A:x.js"));
+    assert.equal(res.status, 502);
+    const body = await read(res);
+    assert.equal(body.status, "error");
+    assert.match(body.error, /^github (connect|put) failed \*\*\*$/);
+  }
+});
+
+test("empty body still takes the full-rebuild path", async () => {
+  configure();
+  const calls = fakeFetch([jsonResponse(404, {}), jsonResponse(201, {})]);
+  const res = await handler(postBody(""));
+  assert.equal(res.status, 202);
+  const body = await read(res);
+  assertRequested(body);
+  assert.ok(!("key" in body));
+  assert.equal(calls[0].url, CONTENTS_URL + "?ref=rebuild-requests");
+  assert.equal(putBody(calls[1]).message, "rebuild requested " + body.requested_at);
+});

@@ -7,6 +7,7 @@ Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    [--branch NAME] [--environment NAME]
                                    [--switch-url PATH --switch-label TEXT]
                                    [--missing-repo LABEL ...]
+                                   [--summary-namespace NAME]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
@@ -37,6 +38,11 @@ Each script gets a one-line summary: the cached AI summary from --summaries
 has a sha256 matching the file, else any cache entry with a matching sha256
 (first in key order, any namespace), else the description from the file's header comment, else nothing. This tool
 only reads the cache; it never calls the network.
+
+Each script node also carries "summary_key", the summary cache key the
+script_map_summarize.py run for this page would write: "NAME|LABEL:path" with
+--summary-namespace NAME, else "LABEL:path". The page's Regenerate summary
+button sends it to --refresh-url.
 """
 
 import argparse
@@ -144,6 +150,7 @@ STRING_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 CLIENT_PATH_RE = re.compile(r"\bclientScriptModulePath\s*=\s*(['\"])([^'\"]+)\1")
 TRY_RE = re.compile(r"\btry\s*\{")
 HARDCODED_ID_RE = re.compile(r"(?i)\b(?:id|internalid)\s*[:=]\s*['\"]?\d+\b")
+NAMESPACE_RE = re.compile(r"[A-Za-z0-9_-]*")
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}([0-9a-fA-F]{24})?")
 BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]+")
 MAX_HEADER = 300
@@ -460,13 +467,15 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos, summaries=None, branch="main"):
+def collect(repos, summaries=None, branch="main", summary_namespace=""):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
     branch is the branch each repo's HEAD is expected to name.
+    summary_namespace, when non-empty, prefixes each script's summary_key with "NAME|".
     """
     summaries = summaries or {}
+    key_prefix = f"{summary_namespace}|" if summary_namespace else ""
     by_sha = {}
     for key in sorted(summaries):
         value = summaries[key]
@@ -581,6 +590,7 @@ def collect(repos, summaries=None, branch="main"):
                 "risk": risk(text, len(set(deploy_ids) | set(touches))),
                 "summary": summary,
                 "summary_source": summary_source,
+                "summary_key": f"{key_prefix}{node_id}",
             })
 
         nodes.extend(script_nodes)
@@ -636,6 +646,9 @@ def main(argv=None):
                         help="toggle label for --switch-url, e.g. Sandbox")
     parser.add_argument("--missing-repo", action="append", default=None, metavar="LABEL",
                         help="repo left out because it has no --branch branch; repeatable")
+    parser.add_argument("--summary-namespace", default="", metavar="NAME",
+                        help="script_map_summarize.py --namespace of this page's summaries; "
+                             "prefixes each script's summary_key with NAME| (default none)")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -660,6 +673,9 @@ def main(argv=None):
         return 2
     if args.switch_url is not None and not args.switch_label:
         print("error: --switch-label is required with --switch-url", file=sys.stderr)
+        return 2
+    if not NAMESPACE_RE.fullmatch(args.summary_namespace):
+        print("error: --summary-namespace must be letters, digits, _ or -", file=sys.stderr)
         return 2
 
     repos = []
@@ -710,7 +726,7 @@ def main(argv=None):
             return 2
 
     try:
-        data = collect(repos, entries, args.branch)
+        data = collect(repos, entries, args.branch, args.summary_namespace)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"

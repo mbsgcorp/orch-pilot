@@ -846,6 +846,161 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 0 new, 5 failed, "
                               f"0 deferred, 0 pruned -> {self.cache}\n")
 
+    # --force
+
+    def test_help_mentions_force(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--force", result.stdout)
+
+    def test_force_cached_key_still_calls_command(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        old = self.entry(self.sha(repo / "ue.js"), "Wrong.")
+        self.write_cache({"A:ue.js": old})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:ue.js"],
+                                             reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(call.call_count, 1)
+        entry = self.read_cache()["entries"]["A:ue.js"]
+        self.assertEqual(entry["summary"], "Right.")
+        self.assertEqual(entry["model"], COMMAND)
+        self.assertEqual(entry["sha256"], old["sha256"])
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_skips_reuse_by_sha(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write_cache({"B:ue.js": self.entry(self.sha(repo / "ue.js"), "Shared.")})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:ue.js"],
+                                             reply="Fresh.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("0 cached, 0 reused, 1 new", out)
+
+    def test_force_does_not_consume_limit(self):
+        repo = self.five_files()
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--limit", "1", "--force", "A:f3.js"],
+            reply=["Zero.", "Three."])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: f0.js", "File: f3.js"])
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:f0.js", "A:f3.js"})
+        self.assertEqual(entries["A:f3.js"]["summary"], "Three.")
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 2 new, 0 failed, "
+                              f"3 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_propagates_to_entries_with_same_sha(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        sha = self.sha(repo / "ue.js")
+        other = self.entry("1" * 64, "Unrelated.")
+        self.write_cache({"A:ue.js": self.entry(sha, "Wrong."),
+                          "B:copy.js": self.entry(sha, "Wrong copy.", model="old"),
+                          "sandbox|A:ue.js": self.entry(sha, "Wrong sandbox."),
+                          "C:other.js": other})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:ue.js"],
+                                             reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        fresh = entries["A:ue.js"]
+        self.assertEqual(fresh["summary"], "Right.")
+        for key in ("B:copy.js", "sandbox|A:ue.js"):
+            with self.subTest(key=key):
+                self.assertEqual(entries[key], fresh)
+        self.assertEqual(entries["C:other.js"], other)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_in_namespace_propagates_to_prod_key(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT}, head=self.SANDBOX_HEAD)
+        sha = self.sha(repo / "ue.js")
+        self.write_cache({"sandbox|A:ue.js": self.entry(sha, "Wrong."),
+                          "A:ue.js": self.entry(sha, "Wrong prod.")})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--branch", "sandbox", "--namespace", "sandbox",
+                                      "--force", "sandbox|A:ue.js"],
+            reply="Right.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:ue.js"]["summary"], "Right.")
+        self.assertEqual(entries["A:ue.js"], entries["sandbox|A:ue.js"])
+
+    def test_force_failure_keeps_old_entry_and_counts_failed(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        old = self.entry(self.sha(repo / "ue.js"), "Wrong.")
+        copy = self.entry(old["sha256"], "Copy.")
+        self.write_cache({"A:ue.js": old, "B:ue.js": copy})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:ue.js"],
+                                             reply=fail)
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(err, "warning: A:ue.js summary failed: exit 1\n")
+        self.assertEqual(self.read_cache()["entries"], {"A:ue.js": old, "B:ue.js": copy})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 1 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_other_namespace_ignored_without_warning(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT}, head=self.SANDBOX_HEAD)
+        mine = self.entry(self.sha(repo / "ue.js"), "Mine.")
+        self.write_cache({"sandbox|A:ue.js": mine})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--branch", "sandbox", "--namespace", "sandbox",
+                                      "--force", "A:ue.js", "--force", "other|A:ue.js",
+                                      "--force", "other|A:missing.js"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        call.assert_not_called()
+        self.assertEqual(self.read_cache()["entries"], {"sandbox|A:ue.js": mine})
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_key_not_found_warns(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        mine = self.entry(self.sha(repo / "ue.js"), "Mine.")
+        self.write_cache({"A:ue.js": mine})
+        code, out, err, call = self.run_main(
+            self.args(("A", repo)) + ["--force", "A:missing.js", "--force", "A:missing.js",
+                                      "--force", "A:gone.js"])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(err.splitlines(), [
+            "warning: --force key not found: A:gone.js",
+            "warning: --force key not found: A:missing.js",
+        ])
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_force_too_large_file_is_found(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        self.write(repo, "big.js", USER_EVENT)
+        with mock.patch.object(script_map, "MAX_BYTES", len(USER_EVENT) - 1):
+            code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:big.js"])
+        self.assertNotIn("--force key not found", err)
+        self.assertIn("warning: A:big.js skipped: too large", err)
+
+    def test_force_counts_toward_failure_streak(self):
+        repo = self.five_files()
+        cached = self.entry(self.sha(repo / "f0.js"), "Wrong.")
+        self.write_cache({"A:f0.js": cached})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--force", "A:f0.js"],
+                                             reply=[fail] * 5)
+        self.assertEqual(code, 3)
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: f0.js", "File: f1.js", "File: f2.js"])
+        self.assertIn("warning: stopping after 3 consecutive failures; 2 files not attempted",
+                      err)
+        self.assertEqual(self.read_cache()["entries"], {"A:f0.js": cached})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 5 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
 
 if __name__ == "__main__":
     unittest.main()
