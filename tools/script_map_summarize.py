@@ -72,12 +72,15 @@ class SummaryError(Exception):
 
 
 def _run(argv, prompt, timeout):
-    """Return (completed, None) on exit 0 or (None, reason) on a failed or timed-out run."""
+    """Return (completed, None) on exit 0 or (None, reason) on a failed, timed-out or
+    unstartable run."""
     try:
         result = subprocess.run(argv, input=prompt, capture_output=True, text=True,
                                 timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, f"timed out after {timeout}s"
+    except OSError as exc:
+        return None, f"could not run: {(exc.strerror or str(exc))[:MAX_STDERR]}"
     if result.returncode != 0:
         lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
         if lines:
@@ -89,7 +92,8 @@ def _run(argv, prompt, timeout):
 def call_command(argv, prompt, timeout):
     """Run argv without a shell, prompt on stdin, and return its stdout stripped.
 
-    Retries once after RETRY_DELAY seconds on a non-zero exit or a timeout.
+    Retries once after RETRY_DELAY seconds on a non-zero exit, a timeout or an
+    OSError starting the command.
     Raises SummaryError with the last attempt's reason, or "empty response"
     when stdout is blank.
     """

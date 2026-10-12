@@ -638,6 +638,60 @@ class SummarizeTest(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
                 self.sleep.assert_called_once_with(10)
 
+    def test_call_command_oserror_retried_then_raised(self):
+        result, run = self.run_command([FileNotFoundError(2, "No such file or directory"),
+                                        PermissionError(13, "Permission denied")])
+        self.assertIsInstance(result, script_map_summarize.SummaryError)
+        self.assertEqual(result.reason, "could not run: Permission denied")
+        self.assertEqual(run.call_count, 2)
+        self.sleep.assert_called_once_with(10)
+
+    def test_call_command_oserror_then_success(self):
+        result, run = self.run_command([OSError(8, "Exec format error"),
+                                        self.done(stdout="Fine.\n")])
+        self.assertEqual(result, "Fine.")
+        self.assertEqual(run.call_count, 2)
+        self.sleep.assert_called_once_with(10)
+
+    def test_call_command_oserror_without_strerror_uses_str_cut_to_200(self):
+        result, _ = self.run_command([OSError("a"), OSError("z" * 300)])
+        self.assertEqual(result.reason, "could not run: " + "z" * 200)
+
+    def test_main_oserror_counts_as_failed_file_and_writes_cache(self):
+        repo = self.make_repo("a", {"a.js": USER_EVENT, "b.js": SUITELET})
+        kept = self.entry(self.sha(repo / "a.js"), "Kept.")
+        self.write_cache({"A:a.js": kept})
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("subprocess.run",
+                        side_effect=OSError(8, "Exec format error")) as run, \
+                mock.patch("shutil.which", return_value=FAKE_PATH), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = script_map_summarize.main(self.args(("A", repo)))
+        self.assertEqual(code, 3)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(err.getvalue().strip(),
+                         "warning: A:b.js summary failed: could not run: Exec format error")
+        self.assertEqual(self.read_cache(), {"version": 1, "entries": {"A:a.js": kept}})
+        self.assertFalse(Path(str(self.cache) + ".tmp").exists())
+        self.assertEqual(out.getvalue(), f"script_map_summarize: 1 cached, 0 new, 1 failed, "
+                                         f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_main_oserror_counts_toward_failure_streak(self):
+        repo = self.five_files()
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError(2, "No such file")) \
+                as run, mock.patch("shutil.which", return_value=FAKE_PATH), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = script_map_summarize.main(self.args(("A", repo)))
+        self.assertEqual(code, 3)
+        self.assertEqual(run.call_count, 6)
+        self.assertEqual(err.getvalue().splitlines()[-1],
+                         "warning: stopping after 3 consecutive failures; 2 files not attempted")
+        self.assertEqual(self.read_cache(), {"version": 1, "entries": {}})
+        self.assertIn("0 cached, 0 new, 5 failed, 0 deferred, 0 pruned", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
