@@ -3,6 +3,7 @@
 
 Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    --out OUT.html [--title TEXT]
+                                   [--summaries CACHE.json]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/main"; any other branch or a detached
@@ -21,9 +22,15 @@ SuiteScript 1.0 files get a script type inferred from their folder names. The
 result is embedded as JSON in tools/script_map_template.html and written to
 OUT. On success one summary line is printed and the exit code is 0; every
 input or branch error prints to stderr and exits 2.
+
+Each script gets a one-line summary: the cached AI summary from --summaries
+(written by tools/script_map_summarize.py) when its sha256 matches the file,
+else the description from the file's header comment, else nothing. This tool
+only reads the cache; it never calls the network.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -128,6 +135,60 @@ CLIENT_PATH_RE = re.compile(r"\bclientScriptModulePath\s*=\s*(['\"])([^'\"]+)\1"
 TRY_RE = re.compile(r"\btry\s*\{")
 HARDCODED_ID_RE = re.compile(r"(?i)\b(?:id|internalid)\s*[:=]\s*['\"]?\d+\b")
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}([0-9a-fA-F]{24})?")
+MAX_HEADER = 300
+
+
+def load_summary_cache(path):
+    """Return the parsed summary cache at path.
+
+    Raises OSError if the file cannot be read (FileNotFoundError when missing) and
+    ValueError unless it is a JSON object with version == 1 and an "entries" object.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        cache = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError(f"{path} is not a valid summary cache") from None
+    if (not isinstance(cache, dict) or cache.get("version") != 1
+            or not isinstance(cache.get("entries"), dict)):
+        raise ValueError(f"{path} is not a valid summary cache")
+    return cache
+
+
+def header_description(text):
+    """Return a plain-text description from the first /** ... */ block, or "".
+
+    Each line is stripped of leading whitespace and "*". An @description tag wins
+    (its text plus following lines up to the next @ line); otherwise the lines
+    before the first @ line are used. Empty and "DEPLOY ON:" lines are dropped and
+    whitespace is collapsed. A result over 300 characters becomes its first 300
+    characters followed by "…" (301 characters in total).
+    """
+    start = text.find("/**")
+    if start == -1:
+        return ""
+    end = text.find("*/", start + 3)
+    if end == -1:
+        return ""
+    lines = [line.lstrip().lstrip("*").strip() for line in text[start + 3:end].split("\n")]
+    picked = []
+    tagged = next((i for i, line in enumerate(lines) if line.startswith("@description")), None)
+    if tagged is not None:
+        picked.append(lines[tagged][len("@description"):])
+        for line in lines[tagged + 1:]:
+            if line.startswith("@"):
+                break
+            picked.append(line)
+    else:
+        for line in lines:
+            if line.startswith("@"):
+                break
+            picked.append(line)
+    kept = [line for line in picked if line.strip() and "deploy on:" not in line.lower()]
+    result = " ".join(" ".join(kept).split())
+    if len(result) > MAX_HEADER:
+        result = result[:MAX_HEADER] + "…"
+    return result
 
 
 def parse_repo_arg(value):
@@ -387,8 +448,12 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos):
-    """Return the JSON-serializable map data for [(label, Path), ...]."""
+def collect(repos, summaries=None):
+    """Return the JSON-serializable map data for [(label, Path), ...].
+
+    summaries is the "entries" dict of a summary cache (see load_summary_cache).
+    """
+    summaries = summaries or {}
     repo_rows = []
     nodes = []
     edges = []
@@ -411,17 +476,19 @@ def collect(repos):
                 if os.path.getsize(full) > MAX_BYTES:
                     skipped.append({"repo": label, "path": rel, "reason": "too large"})
                     continue
-                raw = full.read_text(encoding="utf-8", errors="replace")
+                blob = full.read_bytes()
             except OSError as exc:
                 skipped.append({"repo": label, "path": rel,
                                 "reason": f"unreadable: {exc.strerror}"})
                 continue
-            text = raw.replace("\r\n", "\n")
+            sha = hashlib.sha256(blob).hexdigest()
+            raw = blob.decode("utf-8", errors="replace")
+            text = raw.replace("\r\n", "\n").replace("\r", "\n")
             is_script, script_type, api_version = classify(text)
             if not is_script:
                 skipped.append({"repo": label, "path": rel, "reason": "not SuiteScript"})
                 continue
-            scripts.append((rel, text, script_type, api_version))
+            scripts.append((rel, text, script_type, api_version, sha))
         for exc in walk_errors:
             rel = Path(exc.filename).relative_to(root).as_posix()
             skipped.append({"repo": label, "path": rel,
@@ -429,13 +496,20 @@ def collect(repos):
         scripts.sort(key=lambda item: item[0])
 
         by_basename = {}
-        for rel, _, _, _ in scripts:
+        for rel, _, _, _, _ in scripts:
             by_basename.setdefault(basename_key(rel), []).append(f"{label}:{rel}")
 
         records = {}
         script_nodes = []
-        for rel, text, script_type, api_version in scripts:
+        for rel, text, script_type, api_version, sha in scripts:
             node_id = f"{label}:{rel}"
+            cached = summaries.get(node_id)
+            if (isinstance(cached, dict) and cached.get("sha256") == sha
+                    and isinstance(cached.get("summary"), str)):
+                summary, summary_source = cached["summary"], "ai"
+            else:
+                summary = header_description(text)
+                summary_source = "header" if summary else ""
             deploys = deploy_targets(text)
             deploy_ids = [record_id for record_id, _ in deploys]
             touches = [r for r in touched_records(text) if r not in deploy_ids]
@@ -484,6 +558,8 @@ def collect(repos):
                 "modules": modules,
                 "has_deploy_line": bool(DEPLOY_RE.search(text)),
                 "risk": risk(text, len(set(deploy_ids) | set(touches))),
+                "summary": summary,
+                "summary_source": summary_source,
             })
 
         nodes.extend(script_nodes)
@@ -524,6 +600,8 @@ def main(argv=None):
                         help="repository to scan; repeat for several repos")
     parser.add_argument("--out", required=True, help="HTML file to write")
     parser.add_argument("--title", default="Script map", help="page title")
+    parser.add_argument("--summaries", default=None, metavar="FILE",
+                        help="summary cache written by script_map_summarize.py")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -565,8 +643,19 @@ def main(argv=None):
     for warning in warnings:
         print(warning, file=sys.stderr)
 
+    entries = None
+    if args.summaries is not None:
+        try:
+            entries = load_summary_cache(args.summaries)["entries"]
+        except FileNotFoundError:
+            print(f"error: {args.summaries} does not exist", file=sys.stderr)
+            return 2
+        except (OSError, ValueError):
+            print(f"error: {args.summaries} is not a valid summary cache", file=sys.stderr)
+            return 2
+
     try:
-        data = collect(repos)
+        data = collect(repos, entries)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"

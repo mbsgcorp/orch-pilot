@@ -328,8 +328,28 @@ main { padding: 12px 16px; }
     var title = data.title || 'Script map';
     document.title = title;
     document.getElementById('title').textContent = title;
-    document.getElementById('generated').textContent =
-        'Generated ' + String(data.generated_at || '').replace('T', ' ').replace('Z', '') + ' UTC';
+    function plural(n, unit) { return n + ' ' + unit + (n === 1 ? '' : 's') + ' ago'; }
+
+    function relativeTime(ms) {
+        if (ms < 60000) { return 'just now'; }
+        if (ms < 3600000) { return plural(Math.floor(ms / 60000), 'minute'); }
+        if (ms < 86400000) { return plural(Math.floor(ms / 3600000), 'hour'); }
+        return plural(Math.floor(ms / 86400000), 'day');
+    }
+
+    var generatedEl = document.getElementById('generated');
+    function updateGenerated() {
+        var stamp = String(data.generated_at || '');
+        var when = Date.parse(stamp);
+        if (!stamp || isNaN(when)) {
+            generatedEl.textContent = 'Last updated';
+            return;
+        }
+        generatedEl.textContent = 'Last updated ' + relativeTime(Date.now() - when) + ' · ' +
+            stamp.slice(0, 16).replace('T', ' ') + ' UTC';
+    }
+    updateGenerated();
+    setInterval(updateGenerated, 60000);
     var chips = document.getElementById('repo-chips');
     (data.repos || []).forEach(function (r) {
         var chip = el('span', 'chip' + (r.branch === 'main' ? '' : ' unverified'),
@@ -560,6 +580,15 @@ main { padding: 12px 16px; }
         summary.appendChild(el('span', 'path', s.path));
         details.appendChild(summary);
         var dl = el('dl');
+        var about = el('span');
+        if (s.summary_source === 'ai' || s.summary_source === 'header') {
+            about.appendChild(document.createTextNode(s.summary || ''));
+            about.appendChild(el('span', 'kind',
+                s.summary_source === 'ai' ? ' · AI summary' : ' · From header comment'));
+        } else {
+            about.appendChild(el('span', 'empty', 'No description'));
+        }
+        addField(dl, 'Summary', about);
         addField(dl, 'Type', s.type + (s.type_inferred ? ' (inferred from folder)' : ''));
         addField(dl, 'Entry points', s.entry_points.length ? s.entry_points.join(', ') : 'none');
         addField(dl, 'N/ modules', s.modules.length ? s.modules.join(', ') : 'none');
