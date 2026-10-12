@@ -48,10 +48,10 @@ class SummarizeTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def make_repo(self, name, files=None):
+    def make_repo(self, name, files=None, head="ref: refs/heads/main\n"):
         repo = self.root / name
         (repo / ".git").mkdir(parents=True)
-        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (repo / ".git" / "HEAD").write_text(head, encoding="utf-8")
         for rel, text in (files or {}).items():
             self.write(repo, rel, text)
         return repo
@@ -294,7 +294,8 @@ class SummarizeTest(unittest.TestCase):
         self.assertFalse(Path(str(self.cache) + ".tmp").exists())
 
     def test_new_and_changed_files_get_one_call_each(self):
-        repo = self.make_repo("a", {"ue.js": USER_EVENT, "UserEvent/new.js": SUITELET,
+        new_body = SUITELET + "// new\n"
+        repo = self.make_repo("a", {"ue.js": USER_EVENT, "UserEvent/new.js": new_body,
                                     "same.js": SUITELET, "plain.js": "console.log(1);\n"})
         changed = repo / "ue.js"
         same = repo / "same.js"
@@ -312,7 +313,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(call.call_count, 2)
         users = [self.prompt_user(c) for c in call.call_args_list]
         self.assertEqual(users[0], "File: ue.js\nScript type: UserEventScript\n\n" + USER_EVENT)
-        self.assertEqual(users[1], "File: UserEvent/new.js\nScript type: Suitelet\n\n" + SUITELET)
+        self.assertEqual(users[1], "File: UserEvent/new.js\nScript type: Suitelet\n\n" + new_body)
         for c in call.call_args_list:
             self.assertEqual(c.args[0], shlex.split(command))
             self.assertEqual(c.args[2], 300)
@@ -327,7 +328,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(entries["A:UserEvent/new.js"]["sha256"],
                          self.sha(repo / "UserEvent/new.js"))
         self.assertEqual(entries["A:same.js"]["summary"], "Kept.")
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 2 new, 0 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 2 new, 0 failed, 0 deferred, "
                               f"0 pruned "
                               f"-> {self.cache}\n")
 
@@ -340,7 +341,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         call.assert_not_called()
         self.assertEqual(self.read_cache()["entries"], {"A:ue.js": entry})
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, 0 deferred, "
                               f"0 pruned "
                               f"-> {self.cache}\n")
 
@@ -357,7 +358,7 @@ class SummarizeTest(unittest.TestCase):
         entries = self.read_cache()["entries"]
         self.assertEqual(entries["A:a.js"], old)
         self.assertEqual(entries["A:b.js"]["summary"], "B summary.")
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 new, 1 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 1 failed, 0 deferred, "
                               f"0 pruned "
                               f"-> {self.cache}\n")
 
@@ -381,7 +382,7 @@ class SummarizeTest(unittest.TestCase):
         call.assert_not_called()
         self.assertEqual(set(self.read_cache()["entries"]),
                          {"A:ue.js", "B:removed.js", "AB:removed.js"})
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, 0 deferred, "
                               f"1 pruned "
                               f"-> {self.cache}\n")
 
@@ -396,7 +397,7 @@ class SummarizeTest(unittest.TestCase):
         call.assert_not_called()
         self.assertEqual(err.strip(), "warning: A:big.js skipped: too large")
         self.assertEqual(self.read_cache()["entries"], {"A:big.js": old})
-        self.assertIn("0 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
+        self.assertIn("0 cached, 0 reused, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
     def test_excluded_and_non_suitescript_files_not_sent(self):
         repo = self.make_repo("a", {"plain.js": "x();\n", "tests/t.js": USER_EVENT,
@@ -404,7 +405,7 @@ class SummarizeTest(unittest.TestCase):
         code, out, _, call = self.run_main(self.args(("A", repo)))
         self.assertEqual(code, 0)
         call.assert_not_called()
-        self.assertIn("0 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
+        self.assertIn("0 cached, 0 reused, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
     def test_summary_whitespace_collapsed_and_truncated(self):
         repo = self.make_repo("a", {"a.js": USER_EVENT, "b.js": SUITELET})
@@ -470,7 +471,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         call.assert_not_called()
         self.assertEqual(self.read_cache()["entries"], {"A:ue.js": entry})
-        self.assertIn("1 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
+        self.assertIn("1 cached, 0 reused, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
     # --limit and early stop
 
@@ -492,7 +493,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(set(entries), {"A:f0.js", "A:f1.js", "A:f3.js", "A:f4.js"})
         self.assertEqual(entries["A:f3.js"], old)
         self.assertEqual(entries["A:f4.js"], old)
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 new, 0 failed, 3 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 2 new, 0 failed, 3 deferred, "
                               f"0 pruned -> {self.cache}\n")
 
     def test_limit_counts_only_successes_and_skips_cached(self):
@@ -505,7 +506,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(call.call_count, 2)
         self.assertEqual(self.read_cache()["entries"]["A:f0.js"], cached)
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 1 new, 1 failed, 2 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 1 new, 1 failed, 2 deferred, "
                               f"0 pruned -> {self.cache}\n")
 
     def test_limit_zero_is_unlimited(self):
@@ -513,7 +514,7 @@ class SummarizeTest(unittest.TestCase):
         code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", "0"])
         self.assertEqual(code, 0, err)
         self.assertEqual(call.call_count, 5)
-        self.assertIn("0 cached, 5 new, 0 failed, 0 deferred, 0 pruned", out)
+        self.assertIn("0 cached, 0 reused, 5 new, 0 failed, 0 deferred, 0 pruned", out)
 
     def test_deferred_files_not_pruned(self):
         repo = self.make_repo("a", {"a.js": USER_EVENT, "b.js": SUITELET})
@@ -525,7 +526,7 @@ class SummarizeTest(unittest.TestCase):
         entries = self.read_cache()["entries"]
         self.assertEqual(set(entries), {"A:a.js", "A:b.js"})
         self.assertEqual(entries["A:b.js"], old)
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 new, 0 failed, 1 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, 1 deferred, "
                               f"1 pruned -> {self.cache}\n")
 
     def test_three_consecutive_failures_stop_calls(self):
@@ -545,7 +546,7 @@ class SummarizeTest(unittest.TestCase):
             "warning: stopping after 3 consecutive failures; 2 files not attempted",
         ])
         self.assertEqual(self.read_cache()["entries"], {"A:f4.js": old})
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 new, 5 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 5 failed, 0 deferred, "
                               f"0 pruned -> {self.cache}\n")
 
     def test_success_resets_failure_streak(self):
@@ -557,7 +558,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(call.call_count, 6)
         self.assertNotIn("stopping after", err)
         self.assertEqual(set(self.read_cache()["entries"]), {"A:f2.js", "A:f5.js"})
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 new, 4 failed, 0 deferred, "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 2 new, 4 failed, 0 deferred, "
                               f"0 pruned -> {self.cache}\n")
 
     def test_prompt_with_shell_metacharacters_passed_unchanged(self):
@@ -674,7 +675,7 @@ class SummarizeTest(unittest.TestCase):
                          "warning: A:b.js summary failed: could not run: Exec format error")
         self.assertEqual(self.read_cache(), {"version": 1, "entries": {"A:a.js": kept}})
         self.assertFalse(Path(str(self.cache) + ".tmp").exists())
-        self.assertEqual(out.getvalue(), f"script_map_summarize: 1 cached, 0 new, 1 failed, "
+        self.assertEqual(out.getvalue(), f"script_map_summarize: 1 cached, 0 reused, 0 new, 1 failed, "
                                          f"0 deferred, 0 pruned -> {self.cache}\n")
 
     def test_main_oserror_counts_toward_failure_streak(self):
@@ -690,7 +691,160 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(err.getvalue().splitlines()[-1],
                          "warning: stopping after 3 consecutive failures; 2 files not attempted")
         self.assertEqual(self.read_cache(), {"version": 1, "entries": {}})
-        self.assertIn("0 cached, 0 new, 5 failed, 0 deferred, 0 pruned", out.getvalue())
+        self.assertIn("0 cached, 0 reused, 0 new, 5 failed, 0 deferred, 0 pruned", out.getvalue())
+
+    # --branch, --namespace and reuse by content
+
+    SANDBOX_HEAD = "ref: refs/heads/sandbox\n"
+
+    def test_help_mentions_branch_and_namespace(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--branch", result.stdout)
+        self.assertIn("--namespace", result.stdout)
+        self.assertIn("C cached, R reused, N new, F failed, D deferred, P pruned -> FILE",
+                      result.stdout)
+
+    def test_branch_sandbox_guard(self):
+        sandbox = self.make_repo("s", {"ue.js": USER_EVENT}, head=self.SANDBOX_HEAD)
+        code, out, err, call = self.run_main(self.args(("S", sandbox)) + ["--branch", "sandbox"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(call.call_count, 1)
+
+        main_repo = self.make_repo("m", {"ue.js": USER_EVENT})
+        self.cache.unlink()
+        code, out, err, call = self.run_main(self.args(("M", main_repo)) + ["--branch", "sandbox"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(err.strip(), "error: M is on main, not sandbox")
+        call.assert_not_called()
+        self.assertFalse(self.cache.exists())
+
+    def test_invalid_branch_exits_2(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for value in ("", "bad branch", "a;b", "x$y"):
+            with self.subTest(value=value):
+                code, out, err, call = self.run_main(self.args(("A", repo)) + ["--branch", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, "error: --branch must be a branch name\n")
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
+    def test_invalid_namespace_exits_2(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for value in ("sand box", "a|b", "a:b", "x/y"):
+            with self.subTest(value=value):
+                code, out, err, call = self.run_main(
+                    self.args(("A", repo)) + ["--namespace", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, "error: --namespace must be letters, digits, _ or -\n")
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
+    def test_namespaced_keys_written(self):
+        repo = self.make_repo("r", {"ue.js": USER_EVENT, "Sub/sl.js": SUITELET},
+                              head=self.SANDBOX_HEAD)
+        code, out, err, call = self.run_main(
+            self.args(("RTMH", repo)) + ["--branch", "sandbox", "--namespace", "sandbox"],
+            reply=["One.", "Two."])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 2)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"sandbox|RTMH:ue.js", "sandbox|RTMH:Sub/sl.js"})
+        self.assertEqual(entries["sandbox|RTMH:ue.js"]["sha256"], self.sha(repo / "ue.js"))
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 2 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_namespaced_run_keeps_empty_namespace_entries(self):
+        repo = self.make_repo("r", {"ue.js": USER_EVENT})
+        gone = self.entry("1" * 64)
+        mine = self.entry(self.sha(repo / "ue.js"), "Mine.")
+        self.write_cache({"RTMH:gone.js": gone, "RTMH:ue.js": mine,
+                          "sandbox|RTMH:gone.js": gone, "other|RTMH:gone.js": gone})
+        code, out, err, call = self.run_main(
+            self.args(("RTMH", repo)) + ["--namespace", "sandbox"])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"RTMH:gone.js", "RTMH:ue.js", "sandbox|RTMH:ue.js",
+                                        "other|RTMH:gone.js"})
+        self.assertEqual(entries["RTMH:gone.js"], gone)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 0 new, 0 failed, "
+                              f"0 deferred, 1 pruned -> {self.cache}\n")
+
+    def test_empty_namespace_run_keeps_namespaced_entries(self):
+        repo = self.make_repo("r", {"ue.js": USER_EVENT})
+        gone = self.entry("1" * 64)
+        mine = self.entry(self.sha(repo / "ue.js"), "Mine.")
+        self.write_cache({"RTMH:ue.js": mine, "RTMH:gone.js": gone,
+                          "sandbox|RTMH:gone.js": gone, "sandbox|RTMH:ue.js": mine})
+        code, out, err, call = self.run_main(self.args(("RTMH", repo)))
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(set(self.read_cache()["entries"]),
+                         {"RTMH:ue.js", "sandbox|RTMH:gone.js", "sandbox|RTMH:ue.js"})
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 1 pruned -> {self.cache}\n")
+
+    def test_reuse_by_sha_from_other_key(self):
+        repo = self.make_repo("r", {"same.js": USER_EVENT, "a.js": SUITELET,
+                                    "b.js": SUITELET + "// b\n"},
+                              head=self.SANDBOX_HEAD)
+        prod = self.entry(self.sha(repo / "same.js"), "Prod summary.", model="codex")
+        self.write_cache({"RTMH:Moved/same.js": prod})
+        code, out, err, call = self.run_main(
+            self.args(("RTMH", repo)) + ["--branch", "sandbox", "--namespace", "sandbox",
+                                         "--limit", "1"],
+            reply=["A summary."])
+        self.assertEqual(code, 0, err)
+        # The reused file makes no call and does not use up --limit 1.
+        self.assertEqual(call.call_count, 1)
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: a.js"])
+        entries = self.read_cache()["entries"]
+        reused = entries["sandbox|RTMH:same.js"]
+        self.assertEqual(reused["sha256"], prod["sha256"])
+        self.assertEqual(reused["summary"], "Prod summary.")
+        self.assertEqual(reused["model"], "codex")
+        self.assertNotEqual(reused["generated_at"], prod["generated_at"])
+        self.assertRegex(reused["generated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(entries["RTMH:Moved/same.js"], prod)
+        self.assertNotIn("sandbox|RTMH:b.js", entries)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 1 new, 0 failed, "
+                              f"1 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_reuse_within_one_run_and_legacy_entry_without_model(self):
+        repo = self.make_repo("a", {"x.js": USER_EVENT, "y.js": USER_EVENT,
+                                    "z.js": SUITELET})
+        legacy = {"sha256": self.sha(repo / "z.js"), "summary": "Legacy."}
+        self.write_cache({"B:z.js": legacy, "B:bad.js": "not a dict",
+                          "B:nosum.js": {"sha256": self.sha(repo / "x.js")}})
+        code, out, err, call = self.run_main(self.args(("A", repo)), reply=["X summary."])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(entries["A:y.js"]["summary"], "X summary.")
+        self.assertEqual(entries["A:y.js"]["model"], COMMAND)
+        self.assertEqual(entries["A:z.js"]["summary"], "Legacy.")
+        self.assertEqual(entries["A:z.js"]["model"], "")
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_reuse_bypasses_failure_streak(self):
+        repo = self.five_files()
+        self.write(repo, "g.js", SUITELET)
+        self.write_cache({"B:g.js": self.entry(self.sha(repo / "g.js"), "Shared.")})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)), reply=[fail] * 5)
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(self.read_cache()["entries"]["A:g.js"]["summary"], "Shared.")
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 0 new, 5 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
 
 
 if __name__ == "__main__":
