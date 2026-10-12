@@ -825,6 +825,25 @@ main { padding: 12px 16px; }
         dl.appendChild(dd);
     }
 
+    function lastChange(s) {
+        function pad(n) { return (n < 10 ? '0' : '') + n; }
+        var parts = [];
+        if (typeof s.last_commit_author === 'string' && s.last_commit_author) {
+            parts.push(s.last_commit_author);
+        }
+        var when = typeof s.last_commit_date === 'string' ? Date.parse(s.last_commit_date) : NaN;
+        if (!isNaN(when)) {
+            var d = new Date(when);
+            parts.push(d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' +
+                pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' +
+                pad(d.getUTCMinutes()) + ' UTC');
+        }
+        if (parts.length && typeof s.last_commit === 'string' && s.last_commit) {
+            parts.push(s.last_commit.slice(0, 7));
+        }
+        return parts.length ? parts.join(' · ') : el('span', 'empty', 'Unknown');
+    }
+
     function recordList(s) {
         var items = links[s.id].filter(function (l) { return byId[l.other].kind === 'record'; });
         if (!items.length) { return el('span', 'empty', 'none'); }
@@ -1078,6 +1097,7 @@ main { padding: 12px 16px; }
             summaryValue.appendChild(regenerateControl(s));
         }
         addField(dl, 'Summary', summaryValue);
+        addField(dl, 'Last change', lastChange(s));
         addField(dl, 'Type', s.type + (s.type_inferred ? ' (inferred from folder)' : ''));
         addField(dl, 'Entry points', s.entry_points.length ? s.entry_points.join(', ') : 'none');
         addField(dl, 'N/ modules', s.modules.length ? s.modules.join(', ') : 'none');

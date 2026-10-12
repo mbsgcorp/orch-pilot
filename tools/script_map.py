@@ -8,6 +8,7 @@ Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    [--switch-url PATH --switch-label TEXT]
                                    [--missing-repo LABEL ...]
                                    [--summary-namespace NAME] [--team NAME ...]
+                                   [--git-info FILE]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
@@ -50,6 +51,14 @@ trigger, author, guidance} objects, newest first) from the same cache entry as
 "summary_generated_at"; they are "" and [] for header or empty summaries.
 Each --team NAME (repeatable, 1-40 characters after trimming) is listed in the
 page's "team" field, de-duplicated and sorted case-insensitively.
+
+--git-info FILE reads {"version": 1, "files": {"LABEL:path": {"commit",
+"author", "date"}}} (written by tools/script_map_gitinfo.py). Each script node
+gets "last_commit", "last_commit_author" and "last_commit_date" from the entry
+whose key equals the node id; they are "" when there is no entry, no
+--git-info, or the field is not a string. A missing FILE prints
+"error: FILE does not exist" and an invalid one "error: FILE is not a valid git
+info file"; both exit 2.
 """
 
 import argparse
@@ -182,6 +191,23 @@ def load_summary_cache(path):
             or not isinstance(cache.get("entries"), dict)):
         raise ValueError(f"{path} is not a valid summary cache")
     return cache
+
+
+def load_git_info(path):
+    """Return the parsed git info file at path.
+
+    Raises OSError if the file cannot be read (FileNotFoundError when missing) and
+    ValueError unless it is a JSON object with version == 1 and a "files" object.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        info = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError(f"{path} is not a valid git info file") from None
+    if (not isinstance(info, dict) or info.get("version") != 1
+            or not isinstance(info.get("files"), dict)):
+        raise ValueError(f"{path} is not a valid git info file")
+    return info
 
 
 def history_item(value):
@@ -495,14 +521,16 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos, summaries=None, branch="main", summary_namespace=""):
+def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
     branch is the branch each repo's HEAD is expected to name.
     summary_namespace, when non-empty, prefixes each script's summary_key with "NAME|".
+    git_info is the "files" dict of a git info file (see load_git_info).
     """
     summaries = summaries or {}
+    git_info = git_info or {}
     key_prefix = f"{summary_namespace}|" if summary_namespace else ""
     by_sha = {}
     for key in sorted(summaries):
@@ -607,6 +635,13 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                                       "repo": label, "label": path})
                     add_edge(node_id, target, kind)
 
+            last = git_info.get(node_id)
+            if not isinstance(last, dict):
+                last = {}
+            last_commit, last_author, last_date = (
+                last.get(field) if isinstance(last.get(field), str) else ""
+                for field in ("commit", "author", "date"))
+
             type_inferred = False
             if script_type == "SuiteScript 1.0":
                 inferred = infer_type_from_path(rel)
@@ -635,6 +670,9 @@ def collect(repos, summaries=None, branch="main", summary_namespace=""):
                 "summary_guidance": summary_guidance,
                 "summary_history": summary_history,
                 "summary_key": f"{key_prefix}{node_id}",
+                "last_commit": last_commit,
+                "last_commit_author": last_author,
+                "last_commit_date": last_date,
             })
 
         nodes.extend(script_nodes)
@@ -696,6 +734,8 @@ def main(argv=None):
     parser.add_argument("--team", action="append", default=None, metavar="NAME",
                         help="MBSG team member name listed in the page's team field "
                              f"(1-{MAX_TEAM_NAME} characters); repeatable")
+    parser.add_argument("--git-info", default=None, metavar="FILE",
+                        help="last-change file written by script_map_gitinfo.py")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -780,8 +820,20 @@ def main(argv=None):
             print(f"error: {args.summaries} is not a valid summary cache", file=sys.stderr)
             return 2
 
+    git_files = None
+    if args.git_info is not None:
+        try:
+            git_files = load_git_info(args.git_info)["files"]
+        except FileNotFoundError:
+            print(f"error: {args.git_info} does not exist", file=sys.stderr)
+            return 2
+        except (OSError, ValueError):
+            print(f"error: {args.git_info} is not a valid git info file", file=sys.stderr)
+            return 2
+
     try:
-        data = collect(repos, entries, args.branch, args.summary_namespace)
+        data = collect(repos, entries, args.branch, args.summary_namespace,
+                       git_info=git_files)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"

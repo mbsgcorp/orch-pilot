@@ -1028,7 +1028,8 @@ var u = 'CUSTOMRECORD99';
             "id", "kind", "repo", "path", "name", "type", "type_inferred", "api_version",
             "version", "entry_points", "modules", "has_deploy_line", "risk", "summary",
             "summary_source", "summary_generated_at", "summary_key", "summary_trigger",
-            "summary_author", "summary_guidance", "summary_history"]))
+            "summary_author", "summary_guidance", "summary_history", "last_commit",
+            "last_commit_author", "last_commit_date"]))
 
     # Summary trigger, author, guidance and history; --team
 
@@ -1318,6 +1319,151 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--summaries", result.stdout)
 
+    # Git last change: --git-info
+
+    def write_git_info(self, files, name="gitinfo.json", version=1):
+        path = self.root / name
+        path.write_text(json.dumps({"version": version, "generated_at": "2026-01-01T00:00:00Z",
+                                    "files": files}), encoding="utf-8")
+        return path
+
+    def test_help_mentions_git_info(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--git-info", result.stdout)
+
+    def test_git_info_missing_file(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        missing = self.root / "nope.json"
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(missing)])
+        self.assertEqual(code, 2)
+        self.assertIn(f"error: {missing} does not exist", err)
+        self.assertFalse(self.out.exists())
+
+    def test_git_info_invalid_files(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        cases = {
+            "bad_json": "{not json",
+            "wrong_version": json.dumps({"version": 2, "files": {}}),
+            "files_list": json.dumps({"version": 1, "files": []}),
+            "files_missing": json.dumps({"version": 1}),
+            "not_object": json.dumps([1]),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                path = self.root / f"{name}.json"
+                path.write_text(text, encoding="utf-8")
+                code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                              "--git-info", str(path)])
+                self.assertEqual(code, 2)
+                self.assertIn(f"error: {path} is not a valid git info file", err)
+                self.assertFalse(self.out.exists())
+
+    def test_git_info_fields_on_script_nodes(self):
+        repo = self.make_repo("a")
+        self.write("a/has.js", USER_EVENT)
+        self.write("a/Sub/none.js", USER_EVENT)
+        self.write("a/odd.js", USER_EVENT)
+        self.write("a/bad.js", USER_EVENT)
+        info = self.write_git_info({
+            "A:has.js": {"commit": "a" * 40, "author": "Zoë Ann", "date": "2026-03-01T17:00:00Z"},
+            "A:odd.js": {"commit": 5, "author": None, "date": "2026-03-01T17:00:00Z"},
+            "A:bad.js": "not an object",
+            "A:gone.js": {"commit": "b" * 40, "author": "X", "date": "2026-01-01T00:00:00Z"},
+        })
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(info)])
+        self.assertEqual(code, 0, err)
+        nodes = self.scripts(self.read_data()[1])
+
+        def last(node):
+            return (node["last_commit"], node["last_commit_author"], node["last_commit_date"])
+
+        self.assertEqual(last(nodes["has.js"]), ("a" * 40, "Zoë Ann", "2026-03-01T17:00:00Z"))
+        self.assertEqual(last(nodes["Sub/none.js"]), ("", "", ""))
+        self.assertEqual(last(nodes["odd.js"]), ("", "", "2026-03-01T17:00:00Z"))
+        self.assertEqual(last(nodes["bad.js"]), ("", "", ""))
+        self.assertNotIn("gone.js", nodes)
+
+    def test_git_info_absent_gives_empty_fields(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        node = self.scripts(self.read_data()[1])["ue.js"]
+        self.assertEqual((node["last_commit"], node["last_commit_author"],
+                          node["last_commit_date"]), ("", "", ""))
+        node = self.scripts(self.collect_one(repo))["ue.js"]
+        self.assertEqual((node["last_commit"], node["last_commit_author"],
+                          node["last_commit_date"]), ("", "", ""))
+
+    def test_git_info_key_uses_label(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        files = {"B:ue.js": {"commit": "c" * 40, "author": "Kim", "date": "2026-01-01T00:00:00Z"}}
+        node = self.scripts(script_map.collect([("A", repo)], git_info=files))["ue.js"]
+        self.assertEqual(node["last_commit_author"], "")
+        node = self.scripts(script_map.collect([("B", repo)], git_info=files))["ue.js"]
+        self.assertEqual(node["last_commit_author"], "Kim")
+
+    LAST_CHANGE_TAIL = """
+var out = {};
+scriptEntries().forEach(function (d) {
+    var dl = walk(d, function (c) { return c.tagName === 'dl'; })[0];
+    var labels = dl.children.map(function (c) { return c.tagName === 'dt' ? c.textContent : null; });
+    var i = labels.indexOf('Last change');
+    var dd = dl.children[i + 1];
+    var value = dd.children[0];
+    out[entryName(d)] = {
+        after: dl.children[i - 2].textContent,
+        text: dd.textContent,
+        cls: value && value.className ? value.className : ''
+    };
+});
+console.log(JSON.stringify(out));
+"""
+
+    def test_last_change_full_data_from_git_info(self):
+        info = self.write_git_info({"RTMH:ue.js": {
+            "commit": "0123456789abcdef0123456789abcdef01234567", "author": "Zoë Ann",
+            "date": "2026-03-01T17:05:09Z"}})
+        result = self.run_header_in_node(["--git-info", str(info)], self.LAST_CHANGE_TAIL)
+        self.assertEqual(result, {"ue.js": {
+            "after": "Summary", "text": "Zoë Ann · 2026-03-01 17:05 UTC · 0123456", "cls": ""}})
+
+    def test_last_change_partial_and_missing_data(self):
+        repos = {"RTMH": {n: USER_EVENT for n in ("a.js", "b.js", "c.js", "d.js", "e.js",
+                                                   "f.js", "g.js")}}
+        values = {
+            "a.js": ["Kim", "", ""],
+            "b.js": ["", "2026-03-01T17:05:09Z", ""],
+            "c.js": ["", "2026-03-01T10:05:09-07:00", "abcdef0123"],
+            "d.js": ["Kim", "not a date", "abcdef0123"],
+            "e.js": ["", "", "abcdef0123"],
+            "f.js": ["", "", ""],
+        }
+        prelude = ("editData(function (d) { var v = %s; d.nodes.forEach(function (n) {"
+                   " if (v[n.name]) { n.last_commit_author = v[n.name][0];"
+                   " n.last_commit_date = v[n.name][1]; n.last_commit = v[n.name][2]; }"
+                   " if (n.name === 'g.js') { delete n.last_commit_author;"
+                   " n.last_commit_date = 7; n.last_commit = null; } }); });"
+                   % json.dumps(values))
+        result = self.run_header_in_node([], self.LAST_CHANGE_TAIL, prelude, repos)
+        unknown = {"after": "Summary", "text": "Unknown", "cls": "empty"}
+        self.assertEqual(result, {
+            "a.js": {"after": "Summary", "text": "Kim", "cls": ""},
+            "b.js": {"after": "Summary", "text": "2026-03-01 17:05 UTC", "cls": ""},
+            "c.js": {"after": "Summary", "text": "2026-03-01 17:05 UTC · abcdef0", "cls": ""},
+            "d.js": {"after": "Summary", "text": "Kim · abcdef0", "cls": ""},
+            "e.js": unknown,
+            "f.js": unknown,
+            "g.js": unknown,
+        })
+
     # AC10 / AC16: template
 
     def test_template_is_self_contained_and_safe(self):
@@ -1343,7 +1489,8 @@ var u = 'CUSTOMRECORD99';
                       "Guidance (optional)", "Send", "Cancel", "Guidance used: ",
                       "History (", "first summary", "updated after code change",
                       "regenerated", "copied from identical script",
-                      "Nightly runs and Refresh data only summarize new or changed scripts"):
+                      "Nightly runs and Refresh data only summarize new or changed scripts",
+                      "Last change"):
             self.assertIn(label, text)
         self.assertNotIn("Record X-ray", text)
         self.assertNotIn("Constellation", text)
