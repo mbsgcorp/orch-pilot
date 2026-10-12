@@ -2,12 +2,11 @@ import contextlib
 import hashlib
 import io
 import json
-import os
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -31,25 +30,8 @@ define(['N/record'], (record) => {
 
 SUITELET = "/** @NApiVersion 2.1\n * @NScriptType Suitelet\n */\ndefine([], () => ({}));\n"
 
-FAKE_KEY = "test-placeholder"
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self._body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def http_error(code):
-    return urllib.error.HTTPError("x", code, "x", {}, None)
+COMMAND = "fake-cmd -"
+FAKE_PATH = "/usr/bin/fake-cmd"
 
 
 class SummarizeTest(unittest.TestCase):
@@ -90,15 +72,13 @@ class SummarizeTest(unittest.TestCase):
     def read_cache(self):
         return json.loads(self.cache.read_text(encoding="utf-8"))
 
-    def run_main(self, argv, reply="A summary.", key=FAKE_KEY):
+    def run_main(self, argv, reply="A summary.", which=FAKE_PATH):
         out = io.StringIO()
         err = io.StringIO()
-        env = {"ANTHROPIC_API_KEY": key} if key is not None else {}
-        model = mock.patch.object(script_map_summarize, "call_model")
-        with mock.patch.dict(os.environ, env, clear=False) as _, model as call, \
+        command = mock.patch.object(script_map_summarize, "call_command")
+        which_patch = mock.patch("shutil.which", return_value=which)
+        with command as call, which_patch as self.which, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            if key is None:
-                os.environ.pop("ANTHROPIC_API_KEY", None)
             if isinstance(reply, list):
                 call.side_effect = reply
             elif isinstance(reply, Exception):
@@ -108,11 +88,22 @@ class SummarizeTest(unittest.TestCase):
             code = script_map_summarize.main(list(argv))
         return code, out.getvalue(), err.getvalue(), call
 
-    def args(self, *repos):
+    def args(self, *repos, command=COMMAND):
         argv = []
         for label, path in repos:
             argv += ["--repo", f"{label}={path}"]
-        return argv + ["--cache", str(self.cache)]
+        return argv + ["--cache", str(self.cache), "--command", command]
+
+    def prompt_user(self, call):
+        """Return the user part of a call_command prompt, checking the system prefix."""
+        prompt = call.args[1]
+        prefix = script_map_summarize.SYSTEM_PROMPT + "\n\n"
+        self.assertTrue(prompt.startswith(prefix), prompt[:200])
+        return prompt[len(prefix):]
+
+    def entry(self, sha, summary="Old.", model="m"):
+        return {"sha256": sha, "summary": summary, "model": model,
+                "generated_at": "2026-01-01T00:00:00Z"}
 
     # CLI
 
@@ -120,11 +111,13 @@ class SummarizeTest(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for flag in ("--repo", "--cache", "--model", "--max-chars"):
+        for flag in ("--repo", "--cache", "--command", "--max-chars", "--limit", "--timeout"):
             self.assertIn(flag, result.stdout)
+        self.assertNotIn("--model", result.stdout)
+        self.assertIn('--command "codex exec --skip-git-repo-check -"', result.stdout)
 
     def test_defaults(self):
-        self.assertEqual(script_map_summarize.DEFAULT_MODEL, "claude-haiku-5-5")
+        self.assertFalse(hasattr(script_map_summarize, "DEFAULT_MODEL"))
         self.assertEqual(script_map_summarize.DEFAULT_MAX_CHARS, 60000)
         self.assertEqual(script_map_summarize.SYSTEM_PROMPT,
                          "You explain NetSuite SuiteScript files to NetSuite consultants. "
@@ -149,31 +142,97 @@ class SummarizeTest(unittest.TestCase):
                 call.assert_not_called()
                 self.assertFalse(self.cache.exists())
 
-    def test_missing_api_key(self):
+    def test_command_is_required(self):
         repo = self.make_repo("a", {"ue.js": USER_EVENT})
-        for key in (None, ""):
-            with self.subTest(key=key):
-                code, out, err, call = self.run_main(self.args(("A", repo)), key=key)
+        code, out, err, call = self.run_main(["--repo", f"A={repo}", "--cache", str(self.cache)])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("--command", err)
+        call.assert_not_called()
+        self.assertFalse(self.cache.exists())
+
+    def test_limit_must_be_non_negative_int(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for value in ("-1", "x", "1.5"):
+            with self.subTest(value=value):
+                code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", value])
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
-                self.assertEqual(err.strip(), "error: ANTHROPIC_API_KEY is not set")
+                self.assertIn("--limit", err)
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
+    def test_timeout_must_be_positive(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for value in ("0", "-3", "x"):
+            with self.subTest(value=value):
+                code, out, err, call = self.run_main(
+                    self.args(("A", repo)) + ["--timeout", value])
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("--timeout", err)
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+
+    def test_timeout_passed_through(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        code, _, err, call = self.run_main(self.args(("A", repo)) + ["--timeout", "42"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_args.args[2], 42)
+
+    def test_empty_command(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        for command in ("", "   "):
+            with self.subTest(command=command):
+                code, out, err, call = self.run_main(self.args(("A", repo), command=command))
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertEqual(err, "error: --command is empty\n")
                 self.assertFalse(self.cache.exists())
                 call.assert_not_called()
 
-    def test_missing_api_key_leaves_existing_cache(self):
+    def test_unbalanced_quote_in_command(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        code, out, err, call = self.run_main(self.args(("A", repo), command='codex "exec'))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith("error: --command: "), err)
+        self.assertFalse(self.cache.exists())
+        call.assert_not_called()
+
+    def test_command_not_found(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        code, out, err, call = self.run_main(self.args(("A", repo), command="nope-cmd exec -"),
+                                             which=None)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "error: command not found: nope-cmd\n")
+        self.which.assert_called_once_with("nope-cmd")
+        self.assertFalse(self.cache.exists())
+        call.assert_not_called()
+
+    def test_bad_command_leaves_existing_cache(self):
         repo = self.make_repo("a", {"ue.js": USER_EVENT})
         self.cache.parent.mkdir(parents=True)
         self.cache.write_text("{broken", encoding="utf-8")
-        code, _, err, _ = self.run_main(self.args(("A", repo)), key=None)
-        self.assertEqual(code, 2)
-        self.assertEqual(err.strip(), "error: ANTHROPIC_API_KEY is not set")
-        self.assertEqual(self.cache.read_text(encoding="utf-8"), "{broken")
+        for command, which, message in (("", FAKE_PATH, "error: --command is empty"),
+                                        ("nope-cmd", None, "error: command not found: nope-cmd")):
+            with self.subTest(command=command):
+                code, _, err, _ = self.run_main(self.args(("A", repo), command=command),
+                                                which=which)
+                self.assertEqual(code, 2)
+                self.assertEqual(err.strip(), message)
+                self.assertEqual(self.cache.read_text(encoding="utf-8"), "{broken")
 
-    def test_missing_api_key_checked_before_repos(self):
-        code, _, err, _ = self.run_main(["--repo", "nolabel", "--cache", str(self.cache)],
-                                        key=None)
-        self.assertEqual(code, 2)
-        self.assertEqual(err.strip(), "error: ANTHROPIC_API_KEY is not set")
+    def test_bad_command_checked_before_repos(self):
+        for command, which, message in (("  ", FAKE_PATH, "error: --command is empty"),
+                                        ("nope-cmd", None, "error: command not found: nope-cmd")):
+            with self.subTest(command=command):
+                code, _, err, _ = self.run_main(
+                    ["--repo", "nolabel", "--cache", str(self.cache), "--command", command],
+                    which=which)
+                self.assertEqual(code, 2)
+                self.assertEqual(err.strip(), message)
 
     def test_repo_validation_matches_script_map(self):
         good = self.make_repo("a")
@@ -190,7 +249,8 @@ class SummarizeTest(unittest.TestCase):
         ]
         for argv, message in cases:
             with self.subTest(message=message):
-                code, out, err, call = self.run_main(argv + ["--cache", str(self.cache)])
+                code, out, err, call = self.run_main(
+                    argv + ["--cache", str(self.cache), "--command", COMMAND])
                 self.assertEqual(code, 2)
                 self.assertEqual(out, "")
                 self.assertIn(message, err)
@@ -244,30 +304,31 @@ class SummarizeTest(unittest.TestCase):
             "A:same.js": {"sha256": self.sha(same), "summary": "Kept.", "model": "old",
                           "generated_at": "2026-01-01T00:00:00Z"},
         })
+        command = "codex exec --skip-git-repo-check -"
         code, out, err, call = self.run_main(
-            self.args(("A", repo)) + ["--model", "my-model"],
+            self.args(("A", repo), command=command),
             reply=["New for ue.js.", "New for new.js."])
         self.assertEqual(code, 0, err)
         self.assertEqual(call.call_count, 2)
-        users = [c.args[3] for c in call.call_args_list]
-        self.assertTrue(users[0].startswith("File: ue.js\nScript type: UserEventScript\n\n"))
-        self.assertTrue(users[1].startswith("File: UserEvent/new.js\nScript type: Suitelet\n\n"))
+        users = [self.prompt_user(c) for c in call.call_args_list]
+        self.assertEqual(users[0], "File: ue.js\nScript type: UserEventScript\n\n" + USER_EVENT)
+        self.assertEqual(users[1], "File: UserEvent/new.js\nScript type: Suitelet\n\n" + SUITELET)
         for c in call.call_args_list:
-            self.assertEqual(c.args[0], FAKE_KEY)
-            self.assertEqual(c.args[1], "my-model")
-            self.assertEqual(c.args[2], script_map_summarize.SYSTEM_PROMPT)
-            self.assertEqual(c.args[4], 60)
+            self.assertEqual(c.args[0], shlex.split(command))
+            self.assertEqual(c.args[2], 300)
         entries = self.read_cache()["entries"]
         self.assertEqual(set(entries), {"A:ue.js", "A:UserEvent/new.js", "A:same.js"})
         self.assertEqual(entries["A:ue.js"]["sha256"], self.sha(changed))
         self.assertEqual(entries["A:ue.js"]["summary"], "New for ue.js.")
-        self.assertEqual(entries["A:ue.js"]["model"], "my-model")
+        self.assertEqual(entries["A:ue.js"]["model"], command)
+        self.assertEqual(entries["A:UserEvent/new.js"]["model"], command)
         self.assertRegex(entries["A:ue.js"]["generated_at"],
                          r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(entries["A:UserEvent/new.js"]["sha256"],
                          self.sha(repo / "UserEvent/new.js"))
         self.assertEqual(entries["A:same.js"]["summary"], "Kept.")
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 2 new, 0 failed, 0 pruned "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 2 new, 0 failed, 0 deferred, "
+                              f"0 pruned "
                               f"-> {self.cache}\n")
 
     def test_cached_hit_makes_no_call(self):
@@ -279,7 +340,8 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         call.assert_not_called()
         self.assertEqual(self.read_cache()["entries"], {"A:ue.js": entry})
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 0 pruned "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 0 deferred, "
+                              f"0 pruned "
                               f"-> {self.cache}\n")
 
     def test_failure_keeps_old_entry_and_writes_others(self):
@@ -289,13 +351,14 @@ class SummarizeTest(unittest.TestCase):
         self.write_cache({"A:a.js": old})
         code, out, err, call = self.run_main(
             self.args(("A", repo)),
-            reply=[script_map_summarize.SummaryError("HTTP 500"), "B summary."])
+            reply=[script_map_summarize.SummaryError("exit 1: boom"), "B summary."])
         self.assertEqual(code, 3)
-        self.assertEqual(err.strip(), "warning: A:a.js summary failed: HTTP 500")
+        self.assertEqual(err.strip(), "warning: A:a.js summary failed: exit 1: boom")
         entries = self.read_cache()["entries"]
         self.assertEqual(entries["A:a.js"], old)
         self.assertEqual(entries["A:b.js"]["summary"], "B summary.")
-        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 new, 1 failed, 0 pruned "
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 new, 1 failed, 0 deferred, "
+                              f"0 pruned "
                               f"-> {self.cache}\n")
 
     def test_failure_without_old_entry_adds_nothing(self):
@@ -318,7 +381,8 @@ class SummarizeTest(unittest.TestCase):
         call.assert_not_called()
         self.assertEqual(set(self.read_cache()["entries"]),
                          {"A:ue.js", "B:removed.js", "AB:removed.js"})
-        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 1 pruned "
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 new, 0 failed, 0 deferred, "
+                              f"1 pruned "
                               f"-> {self.cache}\n")
 
     def test_too_large_file_skipped_not_failed_or_pruned(self):
@@ -332,7 +396,7 @@ class SummarizeTest(unittest.TestCase):
         call.assert_not_called()
         self.assertEqual(err.strip(), "warning: A:big.js skipped: too large")
         self.assertEqual(self.read_cache()["entries"], {"A:big.js": old})
-        self.assertIn("0 cached, 0 new, 0 failed, 0 pruned", out)
+        self.assertIn("0 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
     def test_excluded_and_non_suitescript_files_not_sent(self):
         repo = self.make_repo("a", {"plain.js": "x();\n", "tests/t.js": USER_EVENT,
@@ -340,7 +404,7 @@ class SummarizeTest(unittest.TestCase):
         code, out, _, call = self.run_main(self.args(("A", repo)))
         self.assertEqual(code, 0)
         call.assert_not_called()
-        self.assertIn("0 cached, 0 new, 0 failed, 0 pruned", out)
+        self.assertIn("0 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
     def test_summary_whitespace_collapsed_and_truncated(self):
         repo = self.make_repo("a", {"a.js": USER_EVENT, "b.js": SUITELET})
@@ -358,7 +422,7 @@ class SummarizeTest(unittest.TestCase):
         repo = self.make_repo("a", {"ue.js": body})
         code, _, err, call = self.run_main(self.args(("A", repo)) + ["--max-chars", "50"])
         self.assertEqual(code, 0, err)
-        user = call.call_args.args[3]
+        user = self.prompt_user(call.call_args)
         prefix = "File: ue.js\nScript type: UserEventScript\n\n"
         self.assertTrue(user.startswith(prefix))
         self.assertEqual(user[len(prefix):], body[:50])
@@ -369,7 +433,7 @@ class SummarizeTest(unittest.TestCase):
         repo = self.make_repo("a", {"ue.js": body})
         code, _, _, call = self.run_main(self.args(("A", repo)))
         self.assertEqual(code, 0)
-        code_part = call.call_args.args[3].split("\n\n", 1)[1]
+        code_part = self.prompt_user(call.call_args).split("\n\n", 1)[1]
         self.assertEqual(len(code_part), 60000)
 
     def test_crlf_and_invalid_utf8_still_summarized(self):
@@ -377,7 +441,7 @@ class SummarizeTest(unittest.TestCase):
                                     + b"// caf\xe9\r\n"})
         code, _, err, call = self.run_main(self.args(("A", repo)))
         self.assertEqual(code, 0, err)
-        user = call.call_args.args[3]
+        user = self.prompt_user(call.call_args)
         self.assertNotIn("\r", user)
         self.assertIn("caf\ufffd", user)
         self.assertEqual(self.read_cache()["entries"]["A:ue.js"]["sha256"],
@@ -398,74 +462,181 @@ class SummarizeTest(unittest.TestCase):
                                               "--summaries", str(self.cache)]), 0)
         self.assertIn('"summary_source": "ai"', out_html.read_text(encoding="utf-8"))
 
-    # call_model
+    def test_old_model_value_still_cached(self):
+        repo = self.make_repo("a", {"ue.js": USER_EVENT})
+        entry = self.entry(self.sha(repo / "ue.js"), "Kept.", model="claude-haiku-5-5")
+        self.write_cache({"A:ue.js": entry})
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(self.read_cache()["entries"], {"A:ue.js": entry})
+        self.assertIn("1 cached, 0 new, 0 failed, 0 deferred, 0 pruned", out)
 
-    def call(self):
-        return script_map_summarize.call_model(FAKE_KEY, "m", "sys", "user text", 60)
+    # --limit and early stop
 
-    def test_call_model_request_shape(self):
-        reply = {"content": [{"type": "text", "text": "Hello "},
-                             {"type": "tool_use", "text": "ignored"},
-                             {"type": "text", "text": "world."}]}
-        with mock.patch("urllib.request.urlopen", return_value=FakeResponse(reply)) as urlopen:
-            self.assertEqual(self.call(), "Hello world.")
-        request = urlopen.call_args.args[0]
-        self.assertEqual(urlopen.call_args.kwargs, {"timeout": 60})
-        self.assertEqual(request.full_url, "https://api.anthropic.com/v1/messages")
-        self.assertEqual(request.get_method(), "POST")
-        headers = {k.lower(): v for k, v in request.header_items()}
-        self.assertEqual(headers["x-api-key"], FAKE_KEY)
-        self.assertEqual(headers["anthropic-version"], "2023-06-01")
-        self.assertEqual(headers["content-type"], "application/json")
-        self.assertEqual(json.loads(request.data.decode("utf-8")), {
-            "model": "m", "max_tokens": 200, "system": "sys",
-            "messages": [{"role": "user", "content": "user text"}]})
+    def five_files(self):
+        return self.make_repo("a", {f"f{i}.js": USER_EVENT + f"// {i}\n" for i in range(5)})
+
+    def test_limit_defers_remaining_files(self):
+        repo = self.five_files()
+        old = self.entry("0" * 64)
+        self.write_cache({"A:f3.js": old, "A:f4.js": old})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", "2"],
+                                             reply=["One.", "Two."])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(call.call_count, 2)
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: f0.js", "File: f1.js"])
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:f0.js", "A:f1.js", "A:f3.js", "A:f4.js"})
+        self.assertEqual(entries["A:f3.js"], old)
+        self.assertEqual(entries["A:f4.js"], old)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 new, 0 failed, 3 deferred, "
+                              f"0 pruned -> {self.cache}\n")
+
+    def test_limit_counts_only_successes_and_skips_cached(self):
+        repo = self.five_files()
+        cached = self.entry(self.sha(repo / "f0.js"), "Kept.")
+        self.write_cache({"A:f0.js": cached})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", "1"],
+                                             reply=[fail, "Two."])
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(self.read_cache()["entries"]["A:f0.js"], cached)
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 1 new, 1 failed, 2 deferred, "
+                              f"0 pruned -> {self.cache}\n")
+
+    def test_limit_zero_is_unlimited(self):
+        repo = self.five_files()
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", "0"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 5)
+        self.assertIn("0 cached, 5 new, 0 failed, 0 deferred, 0 pruned", out)
+
+    def test_deferred_files_not_pruned(self):
+        repo = self.make_repo("a", {"a.js": USER_EVENT, "b.js": SUITELET})
+        old = self.entry("0" * 64)
+        self.write_cache({"A:b.js": old, "A:gone.js": old})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--limit", "1"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_count, 1)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:a.js", "A:b.js"})
+        self.assertEqual(entries["A:b.js"], old)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 new, 0 failed, 1 deferred, "
+                              f"1 pruned -> {self.cache}\n")
+
+    def test_three_consecutive_failures_stop_calls(self):
+        repo = self.five_files()
+        old = self.entry("0" * 64)
+        self.write_cache({"A:f4.js": old})
+        fail = script_map_summarize.SummaryError("exit 1: usage limit reached")
+        code, out, err, call = self.run_main(self.args(("A", repo)), reply=[fail] * 5)
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 3)
+        sent = [self.prompt_user(c).split("\n", 1)[0] for c in call.call_args_list]
+        self.assertEqual(sent, ["File: f0.js", "File: f1.js", "File: f2.js"])
+        self.assertEqual(err.splitlines(), [
+            "warning: A:f0.js summary failed: exit 1: usage limit reached",
+            "warning: A:f1.js summary failed: exit 1: usage limit reached",
+            "warning: A:f2.js summary failed: exit 1: usage limit reached",
+            "warning: stopping after 3 consecutive failures; 2 files not attempted",
+        ])
+        self.assertEqual(self.read_cache()["entries"], {"A:f4.js": old})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 new, 5 failed, 0 deferred, "
+                              f"0 pruned -> {self.cache}\n")
+
+    def test_success_resets_failure_streak(self):
+        repo = self.make_repo("a", {f"f{i}.js": USER_EVENT + f"// {i}\n" for i in range(6)})
+        fail = script_map_summarize.SummaryError("exit 1")
+        code, out, err, call = self.run_main(self.args(("A", repo)),
+                                             reply=[fail, fail, "Ok.", fail, fail, "Ok."])
+        self.assertEqual(code, 3)
+        self.assertEqual(call.call_count, 6)
+        self.assertNotIn("stopping after", err)
+        self.assertEqual(set(self.read_cache()["entries"]), {"A:f2.js", "A:f5.js"})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 2 new, 4 failed, 0 deferred, "
+                              f"0 pruned -> {self.cache}\n")
+
+    def test_prompt_with_shell_metacharacters_passed_unchanged(self):
+        body = USER_EVENT + "// it's \"quoted\" $HOME `id` | rm -rf / ; && >\n"
+        repo = self.make_repo("a", {"ue.js": body})
+        code, _, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(call.call_args.args[1],
+                         script_map_summarize.SYSTEM_PROMPT + "\n\nFile: ue.js\n"
+                         "Script type: UserEventScript\n\n" + body)
+
+    # call_command
+
+    def run_command(self, results, argv=("fake-cmd", "-"), prompt="the prompt", timeout=300):
+        with mock.patch("subprocess.run", side_effect=results) as run:
+            try:
+                return script_map_summarize.call_command(list(argv), prompt, timeout), run
+            except script_map_summarize.SummaryError as exc:
+                return exc, run
+
+    def done(self, code=0, stdout="", stderr=""):
+        return subprocess.CompletedProcess(["fake-cmd"], code, stdout, stderr)
+
+    def test_call_command_pipes_prompt_on_stdin(self):
+        prompt = "System.\n\nFile: a.js\n\nconst x = '$(id)';"
+        result, run = self.run_command([self.done(stdout="  Summary text.\n\n")],
+                                       prompt=prompt, timeout=77)
+        self.assertEqual(result, "Summary text.")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args, (["fake-cmd", "-"],))
+        self.assertEqual(run.call_args.kwargs, {"input": prompt, "capture_output": True,
+                                                "text": True, "timeout": 77})
+        self.assertNotIn(prompt, run.call_args.args[0])
+        self.assertFalse(run.call_args.kwargs.get("shell", False))
         self.sleep.assert_not_called()
 
-    def test_call_model_retries_once_on_429(self):
-        ok = FakeResponse({"content": [{"type": "text", "text": "Fine."}]})
-        with mock.patch("urllib.request.urlopen", side_effect=[http_error(429), ok]) as urlopen:
-            self.assertEqual(self.call(), "Fine.")
-        self.assertEqual(urlopen.call_count, 2)
+    def test_call_command_blank_stdout_is_empty_response(self):
+        for stdout in ("", "  \n\t\n"):
+            with self.subTest(stdout=stdout):
+                result, run = self.run_command([self.done(stdout=stdout, stderr="progress")])
+                self.assertIsInstance(result, script_map_summarize.SummaryError)
+                self.assertEqual(result.reason, "empty response")
+                self.assertEqual(run.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_call_command_nonzero_exit_retried_then_raised(self):
+        result, run = self.run_command([
+            self.done(1, stderr="first\n"),
+            self.done(1, stdout="partial", stderr="working...\nerror: usage limit reached\n\n"),
+        ])
+        self.assertIsInstance(result, script_map_summarize.SummaryError)
+        self.assertEqual(str(result), "exit 1: error: usage limit reached")
+        self.assertEqual(run.call_count, 2)
         self.sleep.assert_called_once_with(10)
 
-    def test_call_model_second_failure_raises(self):
-        cases = [
-            ([http_error(503), http_error(502)], "HTTP 502"),
-            ([urllib.error.URLError("refused"), urllib.error.URLError("still refused")],
-             "still refused"),
-            ([TimeoutError("timed out"), TimeoutError("timed out again")], "timed out again"),
-        ]
-        for errors, reason in cases:
-            with self.subTest(reason=reason):
+    def test_call_command_long_stderr_cut_to_200(self):
+        result, _ = self.run_command([self.done(2, stderr="x"), self.done(2, stderr="y" * 300)])
+        self.assertEqual(result.reason, "exit 2: " + "y" * 200)
+
+    def test_call_command_blank_stderr(self):
+        result, _ = self.run_command([self.done(1, stderr=""), self.done(5, stderr="  \n")])
+        self.assertEqual(result.reason, "exit 5")
+
+    def test_call_command_timeout_retried_then_raised(self):
+        timeout = subprocess.TimeoutExpired(["fake-cmd"], 30)
+        result, run = self.run_command([timeout, timeout], timeout=30)
+        self.assertIsInstance(result, script_map_summarize.SummaryError)
+        self.assertEqual(result.reason, "timed out after 30s")
+        self.assertEqual(run.call_count, 2)
+        self.sleep.assert_called_once_with(10)
+
+    def test_call_command_success_on_retry(self):
+        for first in (self.done(1, stderr="busy"), subprocess.TimeoutExpired(["fake-cmd"], 300)):
+            with self.subTest(first=type(first).__name__):
                 self.sleep.reset_mock()
-                with mock.patch("urllib.request.urlopen", side_effect=errors) as urlopen:
-                    with self.assertRaises(script_map_summarize.SummaryError) as ctx:
-                        self.call()
-                self.assertEqual(str(ctx.exception), reason)
-                self.assertEqual(urlopen.call_count, 2)
+                result, run = self.run_command([first, self.done(stdout="Fine.\n")])
+                self.assertEqual(result, "Fine.")
+                self.assertEqual(run.call_count, 2)
                 self.sleep.assert_called_once_with(10)
-
-    def test_call_model_400_fails_without_retry(self):
-        with mock.patch("urllib.request.urlopen", side_effect=[http_error(400)]) as urlopen:
-            with self.assertRaises(script_map_summarize.SummaryError) as ctx:
-                self.call()
-        self.assertEqual(str(ctx.exception), "HTTP 400")
-        self.assertEqual(urlopen.call_count, 1)
-        self.sleep.assert_not_called()
-
-    def test_call_model_empty_and_invalid_responses(self):
-        for payload, reason in (({"content": []}, "empty response"),
-                                ({"content": [{"type": "text", "text": "  \n"}]},
-                                 "empty response"),
-                                ({"error": "x"}, "empty response"),
-                                (b"not json", "invalid JSON response")):
-            with self.subTest(reason=reason, payload=payload):
-                with mock.patch("urllib.request.urlopen", return_value=FakeResponse(payload)):
-                    with self.assertRaises(script_map_summarize.SummaryError) as ctx:
-                        self.call()
-                self.assertEqual(str(ctx.exception), reason)
-        self.sleep.assert_not_called()
 
 
 if __name__ == "__main__":

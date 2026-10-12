@@ -1,31 +1,48 @@
 #!/usr/bin/env python3
-"""Cache a short AI summary of every SuiteScript file in one or more repos.
+r"""Cache a short AI summary of every SuiteScript file in one or more repos.
 
 Usage: python3 tools/script_map_summarize.py --repo LABEL=PATH [--repo LABEL=PATH ...]
-                                             --cache FILE [--model NAME] [--max-chars N]
+                                             --cache FILE --command "CMD" [--max-chars N]
+                                             [--limit N] [--timeout SECONDS]
 
-Needs ANTHROPIC_API_KEY in the environment. Repo arguments and branch checks
-follow tools/script_map.py. Files are found and classified the same way; each
-SuiteScript file is hashed (SHA-256 of its bytes) and only files whose hash is
-not already in the cache are sent to the model, one request per file. Entries
-for files no longer found in a passed repo are pruned; entries for repos not
-passed are kept. The cache is written atomically even when some files fail.
+Summaries come from a local command (for example a subscription CLI such as
+Codex): --command is split like a shell would split it, then run without a
+shell once per file. The prompt is written to its stdin and the summary is read
+from its stdout; stderr is only used in failure messages. A failed or timed-out
+run is retried once after 10 seconds. --timeout (default 300) is the limit in
+seconds for each run. --limit N stops after N new summaries in this run (0, the
+default, means no limit); the remaining files are counted as deferred and picked
+up by the next run. After 3 consecutive failed files no further calls are made
+and the remaining files are counted as failed.
+
+Example:
+    python3 tools/script_map_summarize.py --repo RTMH=../rtmh --cache summaries.json \
+        --command "codex exec --skip-git-repo-check -" --limit 50
+
+Repo arguments and branch checks follow tools/script_map.py. Files are found
+and classified the same way; each SuiteScript file is hashed (SHA-256 of its
+bytes) and only files whose hash is not already in the cache are sent to the
+command, one run per file. Entries for files no longer found in a passed repo
+are pruned; entries for repos not passed are kept. The cache is written
+atomically even when some files fail.
 
 The cache is JSON: {"version": 1, "entries": {"LABEL:rel/path.js": {"sha256",
-"summary", "model", "generated_at"}}}. tools/script_map.py reads it with
---summaries. One summary line is printed; the exit code is 0, 2 on input
-errors, or 3 when any file failed.
+"summary", "model", "generated_at"}}}; "model" holds the --command string.
+tools/script_map.py reads it with --summaries. One line is printed:
+"script_map_summarize: C cached, N new, F failed, D deferred, P pruned -> FILE".
+The exit code is 0 (deferred files alone do not fail a run), 2 on usage, input
+or cache errors, or 3 when any file failed.
 """
 
 import argparse
 import hashlib
 import json
 import os
-import socket
+import shlex
+import shutil
+import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,16 +50,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import script_map  # noqa: E402
 
-API_URL = "https://api.anthropic.com/v1/messages"
 SYSTEM_PROMPT = (
     "You explain NetSuite SuiteScript files to NetSuite consultants. Reply with one or "
     "two plain-English sentences (max 50 words) saying what the script does and when it "
     "runs, in business terms. No preamble, no markdown, no code.")
-DEFAULT_MODEL = "claude-haiku-5-5"
 DEFAULT_MAX_CHARS = 60000
-TIMEOUT = 60
+DEFAULT_TIMEOUT = 300
 RETRY_DELAY = 10
 MAX_SUMMARY = 400
+MAX_FAILURE_STREAK = 3
+MAX_STDERR = 200
+EXAMPLE_COMMAND = "codex exec --skip-git-repo-check -"
 
 
 class SummaryError(Exception):
@@ -53,60 +71,36 @@ class SummaryError(Exception):
         self.reason = reason
 
 
-def _post(request, timeout):
-    """Return the parsed JSON reply, or raise HTTPError/URLError/TimeoutError/SummaryError."""
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read()
+def _run(argv, prompt, timeout):
+    """Return (completed, None) on exit 0 or (None, reason) on a failed or timed-out run."""
     try:
-        return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise SummaryError("invalid JSON response") from None
+        result = subprocess.run(argv, input=prompt, capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout}s"
+    if result.returncode != 0:
+        lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+        if lines:
+            return None, f"exit {result.returncode}: {lines[-1][:MAX_STDERR]}"
+        return None, f"exit {result.returncode}"
+    return result, None
 
 
-def _attempt(request, timeout):
-    """Return (reply, None) on success or (None, (retryable, reason)) on failure."""
-    try:
-        return _post(request, timeout), None
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        return None,(exc.code == 429 or 500 <= exc.code <= 599, f"HTTP {exc.code}")
-    except (TimeoutError, socket.timeout) as exc:
-        return None, (True, str(exc) or "timed out")
-    except urllib.error.URLError as exc:
-        return None, (True, str(exc.reason))
+def call_command(argv, prompt, timeout):
+    """Run argv without a shell, prompt on stdin, and return its stdout stripped.
 
-
-def call_model(api_key, model, system, user, timeout):
-    """POST one Messages API request and return the reply text.
-
-    Retries once after RETRY_DELAY seconds on HTTP 429, HTTP 5xx, a timeout or a
-    URL error. Raises SummaryError on any other failure or an empty reply.
+    Retries once after RETRY_DELAY seconds on a non-zero exit or a timeout.
+    Raises SummaryError with the last attempt's reason, or "empty response"
+    when stdout is blank.
     """
-    body = json.dumps({
-        "model": model,
-        "max_tokens": 200,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }).encode("utf-8")
-    request = urllib.request.Request(API_URL, data=body, method="POST", headers={
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    })
-    reply, failure = _attempt(request, timeout)
-    if failure is not None:
-        retryable, reason = failure
-        if not retryable:
-            raise SummaryError(reason)
+    result, reason = _run(argv, prompt, timeout)
+    if reason is not None:
         time.sleep(RETRY_DELAY)
-        reply, failure = _attempt(request, timeout)
-        if failure is not None:
-            raise SummaryError(failure[1])
-    blocks = reply.get("content") if isinstance(reply, dict) else None
-    text = "".join(block.get("text", "") for block in blocks or []
-                   if isinstance(block, dict) and block.get("type") == "text"
-                   and isinstance(block.get("text"), str))
-    if not text.strip():
+        result, reason = _run(argv, prompt, timeout)
+        if reason is not None:
+            raise SummaryError(reason)
+    text = (result.stdout or "").strip()
+    if not text:
         raise SummaryError("empty response")
     return text
 
@@ -122,25 +116,60 @@ def positive_int(value):
     return number
 
 
+def non_negative_int(value):
+    """argparse type: an integer of at least 0."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be at least 0") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Cache AI summaries of SuiteScript files for script_map.py.")
+        description="Cache AI summaries of SuiteScript files for script_map.py.\n"
+                    "Each file's prompt is piped to a local command on stdin, run without a\n"
+                    "shell; the summary is read from its stdout.",
+        epilog=f'example:\n  python3 tools/script_map_summarize.py --repo A=../repo '
+               f'--cache summaries.json \\\n      --command "{EXAMPLE_COMMAND}" --limit 50\n\n'
+               "prints: script_map_summarize: C cached, N new, F failed, D deferred, "
+               "P pruned -> FILE\n"
+               "exit codes: 0 ok (deferred files alone are ok), 2 usage/input/cache error, "
+               "3 some files failed",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", action="append", required=True,
                         metavar="LABEL=PATH",
                         help="repository to scan; repeat for several repos")
     parser.add_argument("--cache", required=True, help="summary cache JSON file")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"model name (default {DEFAULT_MODEL})")
+    parser.add_argument("--command", required=True, metavar="CMD",
+                        help="local command that reads the prompt on stdin and prints the "
+                             "summary on stdout; split like a shell would, run without a "
+                             "shell; stored as the cache 'model' field")
     parser.add_argument("--max-chars", type=positive_int, default=DEFAULT_MAX_CHARS,
                         help=f"characters of code sent per file (default {DEFAULT_MAX_CHARS})")
+    parser.add_argument("--limit", type=non_negative_int, default=0, metavar="N",
+                        help="stop after N new summaries this run; remaining files are "
+                             "deferred to the next run (default 0, no limit)")
+    parser.add_argument("--timeout", type=positive_int, default=DEFAULT_TIMEOUT,
+                        metavar="SECONDS",
+                        help=f"seconds allowed per command run (default {DEFAULT_TIMEOUT})")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("error: ANTHROPIC_API_KEY is not set", file=sys.stderr)
+    try:
+        command_argv = shlex.split(args.command)
+    except ValueError as exc:
+        print(f"error: --command: {exc}", file=sys.stderr)
+        return 2
+    if not command_argv:
+        print("error: --command is empty", file=sys.stderr)
+        return 2
+    if shutil.which(command_argv[0]) is None:
+        print(f"error: command not found: {command_argv[0]}", file=sys.stderr)
         return 2
 
     repos = []
@@ -189,7 +218,7 @@ def main(argv=None):
         return 2
     entries = cache["entries"]
 
-    cached = new = failed = 0
+    cached = new = failed = deferred = not_attempted = streak = 0
     found = set()
     for label, root in repos:
         walk_errors = []
@@ -215,20 +244,30 @@ def main(argv=None):
             if isinstance(entry, dict) and entry.get("sha256") == sha:
                 cached += 1
                 continue
+            if args.limit and new >= args.limit:
+                deferred += 1
+                continue
+            if streak >= MAX_FAILURE_STREAK:
+                failed += 1
+                not_attempted += 1
+                continue
             user = f"File: {rel}\nScript type: {script_type}\n\n{text[:args.max_chars]}"
+            prompt = f"{SYSTEM_PROMPT}\n\n{user}"
             try:
-                reply = call_model(api_key, args.model, SYSTEM_PROMPT, user, TIMEOUT)
+                reply = call_command(command_argv, prompt, args.timeout)
             except SummaryError as exc:
                 print(f"warning: {key} summary failed: {exc.reason}", file=sys.stderr)
                 failed += 1
+                streak += 1
                 continue
             entries[key] = {
                 "sha256": sha,
                 "summary": " ".join(reply.split())[:MAX_SUMMARY],
-                "model": args.model,
+                "model": args.command,
                 "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             new += 1
+            streak = 0
         for exc in walk_errors:
             try:
                 rel = Path(exc.filename).relative_to(root).as_posix()
@@ -237,6 +276,10 @@ def main(argv=None):
             print(f"warning: {label}:{rel} summary failed: unreadable: {exc.strerror}",
                   file=sys.stderr)
             failed += 1
+
+    if not_attempted:
+        print(f"warning: stopping after {MAX_FAILURE_STREAK} consecutive failures; "
+              f"{not_attempted} files not attempted", file=sys.stderr)
 
     prefixes = tuple(f"{label}:" for label, _ in repos)
     stale = [key for key in entries if key.startswith(prefixes) and key not in found]
@@ -253,7 +296,7 @@ def main(argv=None):
         return 2
 
     print(f"script_map_summarize: {cached} cached, {new} new, {failed} failed, "
-          f"{len(stale)} pruned -> {args.cache}")
+          f"{deferred} deferred, {len(stale)} pruned -> {args.cache}")
     return 3 if failed else 0
 
 
