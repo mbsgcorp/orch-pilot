@@ -694,6 +694,47 @@ class ScriptMapTest(unittest.TestCase):
             ("invoice", "invoice"),
         ])
 
+    def test_deploy_targets_multi_word_names(self):
+        cases = {
+            " * DEPLOY ON: Customer Deposit\n": [("customerdeposit", "Customer Deposit")],
+            " * DEPLOY ON: Sales Order - create only\n": [("salesorder", "Sales Order")],
+            " * DEPLOY ON: customrecord2326 (Sales Order Hold)\n":
+                [("customrecord2326", "Sales Order Hold")],
+            " * DEPLOY ON: salesorder, invoice\n":
+                [("salesorder", "salesorder"), ("invoice", "invoice")],
+            # One-word names keep record_id as the label (AC 4), so "Invoice" -> "invoice".
+            " * DEPLOY ON: Sales Order and Invoice\n":
+                [("salesorder", "Sales Order"), ("invoice", "invoice")],
+            " * DEPLOY ON: Sales Order / Invoice\n":
+                [("salesorder", "Sales Order"), ("invoice", "invoice")],
+            " * DEPLOY ON: Item   Fulfillment\n": [("itemfulfillment", "Item Fulfillment")],
+            "/** DEPLOY ON: Sales Order */\n": [("salesorder", "Sales Order")],
+            " * DEPLOY ON: Cash Sale-only\n": [("cashsale", "Cash Sale")],
+            " * DEPLOY ON:\n": [],
+            " * DEPLOY ON: customrecord_x (Billing / AR), invoice\n":
+                [("customrecord_x", "Billing / AR"), ("invoice", "invoice")],
+            " * DEPLOY ON: Sales Order\n * DEPLOY ON: salesorder\n":
+                [("salesorder", "Sales Order")],
+            " * DEPLOY ON: Land; Vendor Bill & Item AND Bin\n":
+                [("land", "land"), ("vendorbill", "Vendor Bill"), ("item", "item"),
+                 ("bin", "bin")],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(script_map.deploy_targets(text), expected)
+
+    def test_deploy_multi_word_record_node(self):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/ue.js", USER_EVENT.replace(
+            "customrecord2326 (Sales Order Hold)", "Customer Deposit"))
+        data = self.collect_one(repo)
+        records = {n["record_id"]: n for n in data["nodes"] if n["kind"] == "record"}
+        self.assertIn("customerdeposit", records)
+        self.assertNotIn("customer", records)
+        self.assertEqual(records["customerdeposit"]["category"], "Billing / AR")
+        self.assertEqual(records["customerdeposit"]["label"], "Customer Deposit")
+        self.assertIn(("A:UserEvent/ue.js", "A:customerdeposit", "deploy"), self.edges(data))
+
     def test_touched_records(self):
         text = """
 record.load({ type: record.Type.SALES_ORDER });
