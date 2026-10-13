@@ -694,6 +694,48 @@ class ScriptMapTest(unittest.TestCase):
             ("invoice", "invoice"),
         ])
 
+    def test_deploy_targets_multi_word_names(self):
+        # Single-word names keep the lowercased id as label (AC 4), so "Invoice" -> "invoice".
+        cases = {
+            " * DEPLOY ON: Customer Deposit": [("customerdeposit", "Customer Deposit")],
+            " * DEPLOY ON: Sales Order - create only": [("salesorder", "Sales Order")],
+            " * DEPLOY ON: customrecord2326 (Sales Order Hold)":
+                [("customrecord2326", "Sales Order Hold")],
+            " * DEPLOY ON: salesorder, invoice":
+                [("salesorder", "salesorder"), ("invoice", "invoice")],
+            " * DEPLOY ON: Sales Order and Invoice":
+                [("salesorder", "Sales Order"), ("invoice", "invoice")],
+            " * DEPLOY ON: Sales Order / Invoice":
+                [("salesorder", "Sales Order"), ("invoice", "invoice")],
+            " * DEPLOY ON: Item   Fulfillment": [("itemfulfillment", "Item Fulfillment")],
+            "/** DEPLOY ON: Sales Order */": [("salesorder", "Sales Order")],
+            " * DEPLOY ON: Customer Deposit-x": [("customerdeposit", "Customer Deposit")],
+            " * DEPLOY ON:": [],
+            " * DEPLOY ON: Sales Order\n * DEPLOY ON: salesorder":
+                [("salesorder", "Sales Order")],
+            " * DEPLOY ON: customrecord_x (Billing / AR), invoice":
+                [("customrecord_x", "Billing / AR"), ("invoice", "invoice")],
+            " * DEPLOY ON: Land AND Sea & Air; Fire":
+                [("land", "land"), ("sea", "sea"), ("air", "air"), ("fire", "fire")],
+            " * DEPLOY ON: Customer Deposit (CREATE)": [("customerdeposit", "CREATE")],
+            " * DEPLOY ON: -, *": [],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(script_map.deploy_targets(text), expected)
+
+    def test_collect_multi_word_deploy_record(self):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/ue.js", USER_EVENT.replace(
+            "DEPLOY ON: customrecord2326 (Sales Order Hold)", "DEPLOY ON: Customer Deposit"))
+        data = self.collect_one(repo)
+        records = {n["id"]: n for n in data["nodes"] if n["kind"] == "record"}
+        node = records["A:customerdeposit"]
+        self.assertEqual(node["record_id"], "customerdeposit")
+        self.assertEqual(node["category"], "Billing / AR")
+        self.assertEqual(node["label"], "Customer Deposit")
+        self.assertIn(("A:UserEvent/ue.js", "A:customerdeposit", "deploy"), self.edges(data))
+
     def test_touched_records(self):
         text = """
 record.load({ type: record.Type.SALES_ORDER });

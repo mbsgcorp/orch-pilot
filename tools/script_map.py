@@ -174,6 +174,8 @@ RETURN_RE = re.compile(r"\breturn\s*\{")
 KEY_RE = re.compile(r"(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*(?=[,:}]|$)")
 DEPLOY_RE = re.compile(r"DEPLOY ON:(.*)", re.IGNORECASE)
 ID_RE = re.compile(r"[A-Za-z0-9_]+")
+DEPLOY_NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:[ \t]+[A-Za-z0-9_]+)*")
+DEPLOY_SEP_RE = re.compile(r"[,;/&]|\band\b", re.IGNORECASE)
 PAREN_RE = re.compile(r"\(([^)]*)\)")
 TYPE_ENUM_RE = re.compile(r"\b(?:record|search)\.Type\.([A-Za-z0-9_]+)")
 TYPE_LITERAL_RE = re.compile(r"\btype\s*:\s*(['\"])([^'\"\n]*)\1")
@@ -457,20 +459,49 @@ def entry_points(text):
 
 
 def deploy_targets(text):
-    """Return [(record_id, label), ...] from every `DEPLOY ON:` line, deduplicated."""
+    """Return [(record_id, label), ...] from every `DEPLOY ON:` line, deduplicated.
+
+    Each line splits on , ; / & and the word "and" outside parentheses; each part's name is
+    the first run of space-separated words before any "(", its id that run joined and
+    lowercased, its label the first (...) text, else the run with spaces collapsed, else the id.
+    """
     targets = []
     seen = set()
     for line in text.split("\n"):
         match = DEPLOY_RE.search(line)
         if not match:
             continue
-        for part in match.group(1).split(","):
-            id_match = ID_RE.search(part)
-            if not id_match:
+        value = match.group(1)
+        # Blank out (...) contents so separators inside parentheses don't split.
+        masked = []
+        depth = 0
+        for char in value:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(depth - 1, 0)
+            masked.append(" " if depth and char != "(" else char)
+        parts = []
+        start = 0
+        for sep in DEPLOY_SEP_RE.finditer("".join(masked)):
+            parts.append(value[start:sep.start()])
+            start = sep.end()
+        parts.append(value[start:])
+        for part in parts:
+            if not part.strip():
                 continue
-            record_id = id_match.group(0).lower()
+            name = DEPLOY_NAME_RE.search(part.split("(", 1)[0])
+            if not name:
+                continue
+            run = name.group(0)
+            record_id = re.sub(r"\s+", "", run).lower()
             paren = PAREN_RE.search(part)
-            label = paren.group(1).strip() if paren and paren.group(1).strip() else record_id
+            if paren and paren.group(1).strip():
+                label = paren.group(1).strip()
+            elif re.search(r"\s", run):
+                label = " ".join(run.split())
+            else:
+                label = record_id
             if record_id not in seen:
                 seen.add(record_id)
                 targets.append((record_id, label))
