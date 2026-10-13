@@ -64,13 +64,17 @@ whose key equals the node id; they are "" when there is no entry, no
 "error: FILE does not exist" and an invalid one "error: FILE is not a valid git
 info file"; both exit 2. Nodes also get "last_commit_subject" and
 "last_commit_pr" from the entry's "subject" and "pr", and "commit_history"
-from its "history" (at most 5 {commit, author, date, subject, pr} objects,
-newest first, each with "commit_url", "pr_url", "file_url" and "raw_url").
+from its "history": the previous versions only, i.e. the object items whose
+"commit" is not "last_commit" (nothing is dropped when "last_commit" is ""),
+at most 5 {commit, author, date, subject, pr} objects, newest first, each
+with "commit_url", "pr_url", "file_url" and "raw_url". Nodes also get
+"last_commit_file_url" and "last_commit_raw_url", the "blob" and "raw" URLs
+of the node's path at "last_commit".
 The file's top-level "repos" object maps LABEL to a GitHub "OWNER/REPO" slug;
-"last_commit_url", "last_commit_pr_url" and the history URLs start with
-LINK_ORIGIN + slug and are "" unless the slug, the 40-hex commit and the PR
-number are valid. A file without "repos" or "history" loads with "" and []
-for the new fields. Every page's data carries "link_origin" (LINK_ORIGIN).
+"last_commit_url", "last_commit_pr_url", "last_commit_file_url",
+"last_commit_raw_url" and the history URLs start with LINK_ORIGIN + slug and
+are "" unless the slug, the 40-hex commit and the PR number are valid. A file
+without "repos" or "history" loads with "" and [] for the new fields. Every page's data carries "link_origin" (LINK_ORIGIN).
 """
 
 import argparse
@@ -284,14 +288,16 @@ def commit_item(value, slug, path):
     return item
 
 
-def normalize_commit_history(value, slug, path):
-    """Return a git info entry's "history" as at most MAX_COMMITS commit items.
+def normalize_commit_history(value, slug, path, current=""):
+    """Return a git info entry's "history" as at most MAX_COMMITS previous commit items.
 
-    A value that is not a list gives []; items that are not objects are dropped.
+    A value that is not a list gives []; items that are not objects are dropped, and
+    so is every item whose "commit" equals current when current is non-empty.
     """
     if not isinstance(value, list):
         return []
-    items = [item for item in value if isinstance(item, dict)][:MAX_COMMITS]
+    items = [item for item in value if isinstance(item, dict)
+             and not (current and item.get("commit") == current)][:MAX_COMMITS]
     return [commit_item(item, slug, path) for item in items]
 
 
@@ -812,7 +818,10 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
                 "last_commit_pr": last_pr,
                 "last_commit_url": commit_url(slug, last_commit),
                 "last_commit_pr_url": pr_url(slug, last_pr),
-                "commit_history": normalize_commit_history(last.get("history"), slug, rel),
+                "last_commit_file_url": file_url(slug, last_commit, rel, "blob"),
+                "last_commit_raw_url": file_url(slug, last_commit, rel, "raw"),
+                "commit_history": normalize_commit_history(
+                    last.get("history"), slug, rel, last_commit),
             })
 
         nodes.extend(script_nodes)
