@@ -582,15 +582,32 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
             return;
         }
         generatedEl.textContent = 'Last updated ' + relativeTime(Date.now() - when) + ' · ' +
-            stamp.slice(0, 16).replace('T', ' ') + ' UTC';
+            pacificStamp(stamp);
     }
     updateGenerated();
     setInterval(updateGenerated, 60000);
 
-    function hhmm(ms) {
-        var d = new Date(ms);
-        function pad(n) { return (n < 10 ? '0' : '') + n; }
-        return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+    // "YYYY-MM-DD h:MM AM PDT" (or PST) in Pacific time for an ISO date string or ms,
+    // or '' when it does not parse. Falls back to "YYYY-MM-DD HH:MM UTC" without Intl.
+    function pacificStamp(value) {
+        if (value === '' || value === null || value === undefined) { return ''; }
+        var d = new Date(value);
+        if (isNaN(d.getTime())) { return ''; }
+        try {
+            var parts = {};
+            new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit',
+                day: '2-digit', hour: 'numeric', minute: '2-digit', hour12: true,
+                timeZoneName: 'short'
+            }).formatToParts(d).forEach(function (p) { parts[p.type] = p.value; });
+            return parts.year + '-' + parts.month + '-' + parts.day + ' ' + parts.hour + ':' +
+                parts.minute + ' ' + parts.dayPeriod + ' ' + parts.timeZoneName;
+        } catch (e) {
+            var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+            return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' +
+                pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' +
+                pad(d.getUTCMinutes()) + ' UTC';
+        }
     }
 
     var refreshUrl = String(data.refresh_url || '');
@@ -629,8 +646,8 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
                         refreshFailed('Refresh failed (HTTP 429).');
                         return;
                     }
-                    refreshFailed('A refresh was already requested at ' + hhmm(when) +
-                        ' UTC. Try again after ' + hhmm(when + 600000) + ' UTC.');
+                    refreshFailed('A refresh was already requested at ' + pacificStamp(when) +
+                        '. Try again after ' + pacificStamp(when + 600000) + '.');
                 }, function () {
                     refreshFailed('Refresh failed (network error).');
                 });
@@ -899,15 +916,9 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         dl.appendChild(dd);
     }
 
-    // "YYYY-MM-DD HH:MM UTC" for an ISO date string, or '' when it does not parse.
-    function utcStamp(value) {
-        function pad(n) { return (n < 10 ? '0' : '') + n; }
-        var when = typeof value === 'string' ? Date.parse(value) : NaN;
-        if (isNaN(when)) { return ''; }
-        var d = new Date(when);
-        return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' +
-            pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' +
-            pad(d.getUTCMinutes()) + ' UTC';
+    // pacificStamp for a date string only; '' for anything else or when it does not parse.
+    function changeStamp(value) {
+        return typeof value === 'string' ? pacificStamp(value) : '';
     }
 
     function usableUrl(url) {
@@ -947,7 +958,7 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
     function lastChange(s) {
         var parts = [];
         if (textOf(s.last_commit_author)) { parts.push(s.last_commit_author); }
-        var stamp = utcStamp(s.last_commit_date);
+        var stamp = changeStamp(s.last_commit_date);
         if (stamp) { parts.push(stamp); }
         if (!parts.length) { return el('span', 'empty', 'Unknown'); }
         var box = el('div');
@@ -982,7 +993,7 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         items.forEach(function (h) {
             var item = el('li');
             var parts = [];
-            var stamp = utcStamp(h.date);
+            var stamp = changeStamp(h.date);
             if (stamp) { parts.push(stamp); }
             if (textOf(h.author)) { parts.push(h.author); }
             commitParts(parts, textOf(h.commit), h.commit_url, textOf(h.pr), h.pr_url);
@@ -1017,8 +1028,8 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
     var statusLoaded = false;
 
     function regenPendingText(ms) {
-        return 'Regeneration requested at ' + hhmm(ms) +
-            ' UTC. New summary usually within 10 minutes; reload to check.';
+        return 'Regeneration requested at ' + pacificStamp(ms) +
+            '. New summary usually within 10 minutes; reload to check.';
     }
 
     function regenerateControl(s) {
@@ -1143,8 +1154,8 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
                         failed('Request failed (network error).');
                         return;
                     }
-                    failed('Already requested at ' + hhmm(when) + ' UTC. Try again after ' +
-                        hhmm(when + 600000) + ' UTC.');
+                    failed('Already requested at ' + pacificStamp(when) + '. Try again after ' +
+                        pacificStamp(when + 600000) + '.');
                 }, function () {
                     failed('Request failed (network error).');
                 });
@@ -1158,7 +1169,7 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
     function stampSuffix(stamp) {
         stamp = typeof stamp === 'string' ? stamp : '';
         if (!stamp || isNaN(Date.parse(stamp))) { return ''; }
-        return ' · generated ' + stamp.slice(0, 16).replace('T', ' ') + ' UTC';
+        return ' · generated ' + pacificStamp(stamp);
     }
 
     function generatedSuffix(s) { return stampSuffix(s.summary_generated_at); }
@@ -1766,8 +1777,8 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         var rebuildAt = typeof body.rebuild_requested_at === 'string' ?
             Date.parse(body.rebuild_requested_at) : NaN;
         if (!isNaN(rebuildAt) && rebuildAt > built) {
-            refreshStatus.textContent = 'Refresh requested at ' + hhmm(rebuildAt) +
-                ' UTC. New data usually within 10 minutes; reload to check.';
+            refreshStatus.textContent = 'Refresh requested at ' + pacificStamp(rebuildAt) +
+                '. New data usually within 10 minutes; reload to check.';
         }
         var requests = body.requests;
         if (!requests || typeof requests !== 'object' || Array.isArray(requests)) { return; }
