@@ -83,6 +83,14 @@ header h1 { font-size: 18px; margin: 0; }
     background: var(--bg);
 }
 .chip.unverified { border-color: var(--medium-border); }
+#repo-chips button.chip {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+}
+#repo-chips button.chip.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .env-badge {
     display: inline-block;
     font-size: 11px;
@@ -137,7 +145,7 @@ main { padding: 12px 16px; }
 .view[hidden] { display: none; }
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .empty { color: var(--muted); font-style: italic; }
-#i-tiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+#i-tiles, #r-tiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .tile {
     flex: 0 1 140px;
     min-width: 110px;
@@ -149,6 +157,10 @@ main { padding: 12px 16px; }
 }
 .tile.high { background: var(--high-bg); border-left-color: var(--high-border); }
 .tile.medium { background: var(--medium-bg); border-left-color: var(--medium-border); }
+.tile.low { background: var(--low-bg); border-left-color: var(--low-border); }
+.tile.sel { outline: 2px solid var(--accent); }
+button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.tile .tile-label, .tile .tile-line { display: block; }
 .tile .tile-label { color: var(--muted); font-size: 12px; }
 .tile .tile-value { font-size: 20px; font-weight: 600; }
 .tile .tile-pct { color: var(--muted); font-size: 12px; margin-left: 6px; }
@@ -303,6 +315,21 @@ main { padding: 12px 16px; }
 }
 .path { color: var(--muted); font-size: 12px; margin-left: 6px; word-break: break-all; }
 #r-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.r-detail { grid-column: 1 / -1; }
+.r-detail > details {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 6px 10px;
+}
+.r-detail a { color: var(--accent); }
+.r-detail summary { cursor: pointer; }
+.r-detail .name { font-weight: 600; word-break: break-word; }
+.r-detail .path { display: block; margin-left: 0; }
+.r-detail dl { margin: 6px 0 0; }
+.r-detail dt { font-weight: 600; margin-top: 6px; }
+.r-detail dd { margin: 2px 0 0; word-break: break-word; }
+.r-detail dd ul { margin: 0; padding-left: 18px; }
 .card {
     border: 1px solid var(--border);
     border-left-width: 5px;
@@ -325,7 +352,7 @@ main { padding: 12px 16px; }
     nav { margin-left: 0; flex-wrap: wrap; }
     main { padding: 8px; }
     .controls { flex-direction: column; align-items: stretch; }
-    #i-tiles { flex-wrap: wrap; }
+    #i-tiles, #r-tiles { flex-wrap: wrap; }
     .tile { flex: 1 1 100px; }
     .matrix-wrap { overflow-x: auto; max-width: 100%; }
     #skipped { margin: 8px; }
@@ -346,24 +373,27 @@ main { padding: 12px 16px; }
     </nav>
 </header>
 <main>
+    <div class="controls" id="i-controls">
+        <input type="search" id="script-search" list="script-search-options" placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">
+        <datalist id="script-search-options"></datalist>
+        <select id="i-repo" aria-label="Client filter"></select>
+        <select id="i-type" aria-label="Script type filter"></select>
+        <select id="i-version" aria-label="Version filter"></select>
+        <select id="i-risk" aria-label="Risk filter">
+            <option value="">All risk</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+        </select>
+        <button type="button" id="i-clear">Clear all</button>
+    </div>
     <section id="view-inventory" class="view">
-        <div class="controls" id="i-controls">
-            <input type="search" id="script-search" list="script-search-options" placeholder="Search scripts" aria-label="Search scripts" autocomplete="off">
-            <datalist id="script-search-options"></datalist>
-            <select id="i-repo" aria-label="Client filter"></select>
-            <select id="i-type" aria-label="Script type filter"></select>
-            <select id="i-version" aria-label="Version filter"></select>
-            <button type="button" id="i-clear">Clear filters</button>
-        </div>
         <div id="i-tiles"></div>
         <div class="matrix-wrap"><div id="i-matrix"></div></div>
         <h2 id="i-list-heading"></h2>
         <div id="i-list"></div>
     </section>
     <section id="view-records" class="view" hidden>
-        <div class="controls" id="rec-controls">
-            <select id="rec-repo" aria-label="Client filter"></select>
-        </div>
         <details id="rec-missing"><summary id="rec-missing-count"></summary><ul id="rec-missing-list"></ul></details>
         <div id="rec-cards"></div>
         <div id="rec-chips"></div>
@@ -373,9 +403,7 @@ main { padding: 12px 16px; }
         <div id="rec-detail"></div>
     </section>
     <section id="view-risk" class="view" hidden>
-        <div class="controls" id="r-controls">
-            <select id="r-repo" aria-label="Repo filter"></select>
-        </div>
+        <div id="r-tiles"></div>
         <div id="r-grid"></div>
     </section>
 </main>
@@ -395,7 +423,11 @@ main { padding: 12px 16px; }
         ['PL', 'Portlet'], ['WA', 'WorkflowActionScript'], ['MU', 'MassUpdateScript']];
     var VERSIONS = ['1.0', '2.0', '2.x', '2.1', 'Other', 'None'];
     var BASE_VERSIONS = ['1.0', '2.0', '2.x', '2.1'];
+    var RISK_LEVELS = ['high', 'medium', 'low'];
     var ALL = '';
+    // One filter state shared by every view, mirrored in the URL hash.
+    var state = { search: '', repo: ALL, type: ALL, version: ALL, risk: ALL };
+    var currentView = 'inventory';
 
     var nodes = data.nodes || [];
     var edges = data.edges || [];
@@ -608,11 +640,27 @@ main { padding: 12px 16px; }
         });
     }
     var chips = document.getElementById('repo-chips');
+    var repoChips = [];
     (data.repos || []).forEach(function (r) {
-        var chip = el('span', 'chip' + (r.branch !== 'branch not verified' ? '' : ' unverified'),
-            r.label + ' · ' + r.script_count + ' scripts · ' + r.branch);
+        var base = 'chip' + (r.branch !== 'branch not verified' ? '' : ' unverified');
+        var chip = el('button', base, r.label + ' · ' + r.script_count + ' scripts · ' + r.branch);
+        chip.type = 'button';
+        chip.setAttribute('aria-pressed', 'false');
+        chip.addEventListener('click', function () {
+            state.repo = state.repo === r.label ? ALL : r.label;
+            applyFilters();
+        });
+        repoChips.push({ label: r.label, base: base, button: chip });
         chips.appendChild(chip);
     });
+
+    function renderRepoChips() {
+        repoChips.forEach(function (c) {
+            var on = state.repo === c.label;
+            c.button.className = c.base + (on ? ' active' : '');
+            c.button.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+    }
     var missingRepos = Array.isArray(data.missing_repos) ? data.missing_repos : [];
     if (missingRepos.length) {
         var buildBranch = String(data.branch || 'main');
@@ -621,21 +669,16 @@ main { padding: 12px 16px; }
     }
 
     var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk' };
-    var controlRows = { inventory: 'i-controls', records: 'rec-controls', risk: 'r-controls' };
     var navButtons = document.querySelectorAll('nav button');
     function showView(name) {
+        currentView = name;
         Object.keys(views).forEach(function (k) {
             document.getElementById(views[k]).hidden = k !== name;
         });
         Array.prototype.forEach.call(navButtons, function (b) {
             b.classList.toggle('active', b.getAttribute('data-view') === name);
         });
-        // One search box: move it (not a copy) to the front of the active view's filters.
-        var row = document.getElementById(controlRows[name]);
-        var input = document.getElementById('script-search');
-        var options = document.getElementById('script-search-options');
-        row.insertBefore(options, row.firstChild);
-        row.insertBefore(input, options);
+        writeHash();
     }
     Array.prototype.forEach.call(navButtons, function (b) {
         b.addEventListener('click', function () { showView(b.getAttribute('data-view')); });
@@ -645,12 +688,12 @@ main { padding: 12px 16px; }
     var iRepo = document.getElementById('i-repo');
     var iType = document.getElementById('i-type');
     var iVersion = document.getElementById('i-version');
+    var iRisk = document.getElementById('i-risk');
     var iClear = document.getElementById('i-clear');
     var iTiles = document.getElementById('i-tiles');
     var iMatrix = document.getElementById('i-matrix');
     var iListHeading = document.getElementById('i-list-heading');
     var iList = document.getElementById('i-list');
-    var filter = { type: ALL, version: ALL };
     fillRepoSelect(iRepo);
 
     var shortLabels = {};
@@ -706,42 +749,59 @@ main { padding: 12px 16px; }
     });
 
     function matchesSearch(s) {
-        var query = String(searchInput.value || '').trim().toLowerCase();
+        var query = String(state.search || '').trim().toLowerCase();
         if (!query) { return true; }
         return s.name.toLowerCase().indexOf(query) !== -1;
     }
 
+    // Every shared filter; `skip` lists facets ('type', 'version', 'risk') to ignore.
+    function matchesFilters(s, skip) {
+        skip = skip || [];
+        return inRepo(s, state.repo) && matchesSearch(s) &&
+            (skip.indexOf('type') !== -1 || state.type === ALL || s.type === state.type) &&
+            (skip.indexOf('version') !== -1 || state.version === ALL ||
+                s.version === state.version) &&
+            (skip.indexOf('risk') !== -1 || state.risk === ALL || s.risk.level === state.risk);
+    }
+
     function clientScripts() {
-        var repo = iRepo.value;
-        return scripts.filter(function (s) { return inRepo(s, repo); });
+        return scripts.filter(function (s) { return inRepo(s, state.repo); });
+    }
+
+    // One clickable tile in container; `selected` marks the active filter value.
+    function tile(container, label, value, pct, tone, selected, onClick) {
+        var box = el('button', 'tile' + (tone ? ' ' + tone : '') + (selected ? ' sel' : ''));
+        box.type = 'button';
+        box.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        box.appendChild(el('span', 'tile-label', label));
+        var line = el('span', 'tile-line');
+        line.appendChild(el('span', 'tile-value', value));
+        if (pct !== null) { line.appendChild(el('span', 'tile-pct', pct + '%')); }
+        box.appendChild(line);
+        box.addEventListener('click', onClick);
+        container.appendChild(box);
     }
 
     function renderTiles(list) {
         clear(iTiles);
         var total = list.length;
-        function tile(label, value, pct, tone) {
-            var box = el('div', 'tile' + (tone ? ' ' + tone : ''));
-            box.appendChild(el('div', 'tile-label', label));
-            var line = el('div');
-            line.appendChild(el('span', 'tile-value', value));
-            if (pct !== null) { line.appendChild(el('span', 'tile-pct', pct + '%')); }
-            box.appendChild(line);
-            iTiles.appendChild(box);
-        }
-        tile('Total scripts', total, null, '');
+        tile(iTiles, 'Total scripts', total, null, '', state.version === ALL, function () {
+            setFilter(state.type, ALL);
+        });
         BASE_VERSIONS.forEach(function (v) {
             var count = list.filter(function (s) { return s.version === v; }).length;
             var pct = total ? Math.round(count * 100 / total) : 0;
-            tile(v, count, pct, v === '1.0' ? 'high' : v === '2.0' ? 'medium' : '');
+            tile(iTiles, v, count, pct, v === '1.0' ? 'high' : v === '2.0' ? 'medium' : '',
+                state.version === v, function () {
+                    setFilter(state.type, state.version === v ? ALL : v);
+                });
         });
     }
 
     function setFilter(type, version) {
-        filter.type = type;
-        filter.version = version;
-        iType.value = type;
-        iVersion.value = version;
-        renderFiltered();
+        state.type = type;
+        state.version = version;
+        applyFilters();
     }
 
     function renderMatrix(list) {
@@ -761,14 +821,14 @@ main { padding: 12px 16px; }
             counts[key] = (counts[key] || 0) + 1;
         });
         function count(t, v) { return counts[t + '\n' + v] || 0; }
-        var typeOnly = filter.type !== ALL && filter.version === ALL;
-        var versionOnly = filter.version !== ALL && filter.type === ALL;
+        var typeOnly = state.type !== ALL && state.version === ALL;
+        var versionOnly = state.version !== ALL && state.type === ALL;
 
         var table = el('table', 'matrix');
         var head = el('tr');
         head.appendChild(el('th', 'row-label', 'Type'));
         columns.forEach(function (v) {
-            var th = el('th', versionOnly && filter.version === v ? 'sel' : null);
+            var th = el('th', versionOnly && state.version === v ? 'sel' : null);
             var btn = el('button', null, v);
             btn.type = 'button';
             btn.setAttribute('title', 'Show all ' + v + ' scripts');
@@ -781,7 +841,7 @@ main { padding: 12px 16px; }
 
         rows.forEach(function (t) {
             var tr = el('tr');
-            var th = el('th', 'row-label' + (typeOnly && filter.type === t ? ' sel' : ''));
+            var th = el('th', 'row-label' + (typeOnly && state.type === t ? ' sel' : ''));
             var btn = el('button');
             btn.type = 'button';
             if (shortLabels[t]) { btn.appendChild(el('span', 'short', shortLabels[t].label)); }
@@ -798,9 +858,9 @@ main { padding: 12px 16px; }
                     return;
                 }
                 var cls = v === '1.0' ? 'v-high' : v === '2.0' ? 'v-medium' : '';
-                if (filter.type === t && filter.version === v) {
+                if (state.type === t && state.version === v) {
                     cls += ' sel';
-                } else if ((typeOnly && filter.type === t) || (versionOnly && filter.version === v)) {
+                } else if ((typeOnly && state.type === t) || (versionOnly && state.version === v)) {
                     cls += ' in-sel';
                 }
                 var td = el('td', cls);
@@ -808,7 +868,7 @@ main { padding: 12px 16px; }
                 cell.type = 'button';
                 cell.setAttribute('title', t + ' · ' + v);
                 cell.addEventListener('click', function () {
-                    if (filter.type === t && filter.version === v) {
+                    if (state.type === t && state.version === v) {
                         setFilter(ALL, ALL);
                     } else {
                         setFilter(t, v);
@@ -1195,10 +1255,7 @@ main { padding: 12px 16px; }
 
     function renderList(list) {
         clear(iList);
-        var shown = list.filter(function (s) {
-            return matchesSearch(s) && (filter.type === ALL || s.type === filter.type) &&
-                (filter.version === ALL || s.version === filter.version);
-        });
+        var shown = list.slice();
         shown.sort(function (a, b) {
             return versionRank(a.version) - versionRank(b.version) ||
                 a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path);
@@ -1211,38 +1268,41 @@ main { padding: 12px 16px; }
         shown.forEach(function (s) { iList.appendChild(scriptEntry(s)); });
     }
 
-    function renderFiltered() {
-        var list = clientScripts();
-        renderMatrix(list);
-        renderList(list);
-    }
-
     function renderInventory() {
         var list = clientScripts();
-        filter.type = fillFilter(iType, 'All types', distinct(list, 'type').sort(compareTypes),
-            filter.type, typeText);
-        filter.version = fillFilter(iVersion, 'All versions',
+        state.type = fillFilter(iType, 'All types', distinct(list, 'type').sort(compareTypes),
+            state.type, typeText);
+        state.version = fillFilter(iVersion, 'All versions',
             distinct(list, 'version').sort(function (a, b) { return versionRank(a) - versionRank(b); }),
-            filter.version);
-        renderTiles(list);
-        renderMatrix(list);
-        renderList(list);
+            state.version);
+        renderTiles(scripts.filter(function (s) { return matchesFilters(s, ['version']); }));
+        renderMatrix(scripts.filter(function (s) { return matchesFilters(s, ['type', 'version']); }));
+        renderList(scripts.filter(function (s) { return matchesFilters(s); }));
     }
 
-    iRepo.addEventListener('change', renderInventory);
-    iType.addEventListener('change', function () { setFilter(iType.value, filter.version); });
-    iVersion.addEventListener('change', function () { setFilter(filter.type, iVersion.value); });
+    iRepo.addEventListener('change', function () {
+        state.repo = iRepo.value;
+        applyFilters();
+    });
+    iType.addEventListener('change', function () { setFilter(iType.value, state.version); });
+    iVersion.addEventListener('change', function () { setFilter(state.type, iVersion.value); });
+    iRisk.addEventListener('change', function () {
+        state.risk = iRisk.value;
+        applyFilters();
+    });
     iClear.addEventListener('click', function () {
-        searchInput.value = '';
-        filter.type = ALL;
-        filter.version = ALL;
-        iType.value = ALL;
-        iVersion.value = ALL;
-        renderAll();
+        state.search = '';
+        state.repo = ALL;
+        state.type = ALL;
+        state.version = ALL;
+        state.risk = ALL;
+        recArea = ALL;
+        recRecord = ALL;
+        closeRiskDetail();
+        applyFilters();
     });
 
     // Records
-    var recRepo = document.getElementById('rec-repo');
     var recCards = document.getElementById('rec-cards');
     var recChips = document.getElementById('rec-chips');
     var recListHeading = document.getElementById('rec-list-heading');
@@ -1253,7 +1313,6 @@ main { padding: 12px 16px; }
     var recMissingList = document.getElementById('rec-missing-list');
     var recArea = ALL;
     var recRecord = ALL;
-    fillRepoSelect(recRepo);
 
     function recordScripts(rec, kind) {
         return links[rec.id].filter(function (l) {
@@ -1266,7 +1325,7 @@ main { padding: 12px 16px; }
         records.forEach(function (r) {
             if (!inRepo(r, repo)) { return; }
             var connected = links[r.id].filter(function (l) {
-                return byId[l.other].kind === 'script' && matchesSearch(byId[l.other]);
+                return byId[l.other].kind === 'script' && matchesFilters(byId[l.other]);
             });
             if (!connected.length) { return; }
             var area = areas[r.category];
@@ -1303,7 +1362,7 @@ main { padding: 12px 16px; }
         var out = [];
         group.nodes.forEach(function (r) {
             recordScripts(r, kind).forEach(function (s) {
-                if (!seen[s.id] && matchesSearch(s)) { seen[s.id] = true; out.push(s); }
+                if (!seen[s.id] && matchesFilters(s)) { seen[s.id] = true; out.push(s); }
             });
         });
         return out;
@@ -1321,9 +1380,8 @@ main { padding: 12px 16px; }
     }
 
     function renderMissing() {
-        var repo = recRepo.value;
         var missing = scripts.filter(function (s) {
-            return inRepo(s, repo) && matchesSearch(s) && !s.has_deploy_line &&
+            return matchesFilters(s) && !s.has_deploy_line &&
                 (s.type === 'UserEventScript' || s.type === 'ClientScript');
         });
         recMissingCount.textContent = missing.length +
@@ -1386,7 +1444,7 @@ main { padding: 12px 16px; }
             g.nodes.forEach(function (r) {
                 links[r.id].forEach(function (l) {
                     var s = byId[l.other];
-                    if (s.kind !== 'script' || !matchesSearch(s)) { return; }
+                    if (s.kind !== 'script' || !matchesFilters(s)) { return; }
                     if (!seen[s.id]) { seen[s.id] = true; list.push(s); inArea[s.id] = []; }
                     var text = g.label + ' (' + l.kind + ')';
                     if (inArea[s.id].indexOf(text) === -1) { inArea[s.id].push(text); }
@@ -1452,7 +1510,7 @@ main { padding: 12px 16px; }
         recListHeading.hidden = true;
         recListHeading.textContent = '';
         recNote.hidden = true;
-        var areas = areaRecords(recRepo.value);
+        var areas = areaRecords(state.repo);
         var shown = (data.record_categories || []).filter(function (name) { return areas[name]; });
         if (recArea !== ALL && shown.indexOf(recArea) === -1) {
             recArea = ALL;
@@ -1479,33 +1537,50 @@ main { padding: 12px 16px; }
         }
     }
 
-    recRepo.addEventListener('change', renderRecords);
-
     // Risk grid
-    var rRepo = document.getElementById('r-repo');
+    var rTiles = document.getElementById('r-tiles');
     var rGrid = document.getElementById('r-grid');
-    fillRepoSelect(rRepo);
+    var openRisk = null;
 
-    function openInInventory(s) {
-        iRepo.value = s.repo;
-        filter.type = s.type;
-        filter.version = s.version;
-        showView('inventory');
-        renderInventory();
-        var entries = iList.querySelectorAll('details');
-        for (var i = 0; i < entries.length; i++) {
-            if (entries[i].getAttribute('data-id') === s.id) {
-                entries[i].open = true;
-                entries[i].scrollIntoView();
-                break;
-            }
-        }
+    function renderRiskTiles() {
+        clear(rTiles);
+        var list = scripts.filter(function (s) { return matchesFilters(s, ['risk']); });
+        RISK_LEVELS.forEach(function (level) {
+            var count = list.filter(function (s) { return s.risk.level === level; }).length;
+            tile(rTiles, level.charAt(0).toUpperCase() + level.slice(1), count, null, level,
+                state.risk === level, function () {
+                    state.risk = state.risk === level ? ALL : level;
+                    applyFilters();
+                });
+        });
+    }
+
+    function closeRiskDetail() {
+        if (!openRisk) { return; }
+        if (openRisk.detail.parentNode) { openRisk.detail.parentNode.removeChild(openRisk.detail); }
+        openRisk.card.setAttribute('aria-expanded', 'false');
+        openRisk = null;
+    }
+
+    // Show the script's full details right after its card; only one is open at a time.
+    function toggleRiskDetail(card, s) {
+        var wasOpen = openRisk !== null && openRisk.card === card;
+        closeRiskDetail();
+        if (wasOpen) { return; }
+        var wrap = el('div', 'r-detail');
+        var entry = scriptEntry(s);
+        entry.open = true;
+        wrap.appendChild(entry);
+        rGrid.insertBefore(wrap, card.nextSibling);
+        card.setAttribute('aria-expanded', 'true');
+        openRisk = { card: card, detail: wrap };
     }
 
     function renderRisk() {
+        renderRiskTiles();
         clear(rGrid);
-        var repo = rRepo.value;
-        var list = scripts.filter(function (s) { return inRepo(s, repo) && matchesSearch(s); });
+        openRisk = null;
+        var list = scripts.filter(function (s) { return matchesFilters(s); });
         if (!list.length) {
             rGrid.appendChild(el('p', 'empty', 'No scripts found'));
             return;
@@ -1518,6 +1593,7 @@ main { padding: 12px 16px; }
             var card = el('div', 'card ' + s.risk.level);
             card.tabIndex = 0;
             card.setAttribute('role', 'button');
+            card.setAttribute('aria-expanded', 'false');
             card.appendChild(el('div', 'name', s.name));
             card.appendChild(el('div', 'meta', s.repo + ' · ' + s.type + ' · ' +
                 s.risk.level + ' (' + s.risk.score + ')'));
@@ -1528,21 +1604,132 @@ main { padding: 12px 16px; }
                 ul.appendChild(el('li', null, 'no risk factors'));
             }
             card.appendChild(ul);
-            card.addEventListener('click', function () { openInInventory(s); });
+            card.addEventListener('click', function () { toggleRiskDetail(card, s); });
             card.addEventListener('keydown', function (ev) {
-                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openInInventory(s); }
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                    ev.preventDefault();
+                    toggleRiskDetail(card, s);
+                }
             });
             rGrid.appendChild(card);
         });
     }
-    rRepo.addEventListener('change', renderRisk);
+
+    function syncControls() {
+        if (searchInput.value !== state.search) { searchInput.value = state.search; }
+        iRepo.value = state.repo;
+        iRisk.value = state.risk;
+        renderRepoChips();
+    }
 
     function renderAll() {
-        renderFiltered();
+        syncControls();
+        renderInventory();
         renderRecords();
         renderRisk();
     }
-    searchInput.addEventListener('input', renderAll);
+
+    // Re-render every view after a filter change and mirror the state in the URL hash.
+    function applyFilters() {
+        renderAll();
+        writeHash();
+    }
+
+    searchInput.addEventListener('input', function () {
+        state.search = String(searchInput.value || '');
+        applyFilters();
+    });
+
+    // URL hash: #view=..&client=..&type=..&version=..&risk=..&q=.. with defaults omitted.
+    var HASH_KEYS = ['view', 'client', 'type', 'version', 'risk', 'q'];
+    var MAX_QUERY = 100;
+
+    function hasLocation() {
+        return typeof window !== 'undefined' && !!window && !!window.location;
+    }
+
+    function buildHash() {
+        var values = {
+            view: currentView === 'inventory' ? '' : currentView,
+            client: state.repo,
+            type: state.type,
+            version: state.version,
+            risk: state.risk,
+            q: state.search
+        };
+        var parts = [];
+        HASH_KEYS.forEach(function (k) {
+            if (values[k]) { parts.push(k + '=' + encodeURIComponent(values[k])); }
+        });
+        return parts.length ? '#' + parts.join('&') : '';
+    }
+
+    function updateSwitchLink() {
+        if (switchUrl && otherEnv) { otherEnv.setAttribute('href', switchUrl + buildHash()); }
+    }
+
+    function writeHash() {
+        updateSwitchLink();
+        if (!hasLocation()) { return; }
+        var next = buildHash();
+        if (String(window.location.hash || '') === next) { return; }
+        if (window.history && typeof window.history.replaceState === 'function') {
+            window.history.replaceState(null, '', next);
+        } else {
+            window.location.hash = next;
+        }
+    }
+
+    function parseHash(raw) {
+        var out = Object.create(null);
+        var text = String(raw || '');
+        if (text.charAt(0) === '#') { text = text.slice(1); }
+        if (!text) { return out; }
+        text.split('&').forEach(function (pair) {
+            var at = pair.indexOf('=');
+            if (at < 1) { return; }
+            var key;
+            var value;
+            try {
+                key = decodeURIComponent(pair.slice(0, at));
+                value = decodeURIComponent(pair.slice(at + 1));
+            } catch (e) {
+                // A malformed escape: this pair is ignored by design, the rest still applies.
+                return;
+            }
+            out[key] = value;
+        });
+        return out;
+    }
+
+    function hashValue(values, key, valid) {
+        return key in values && valid(values[key]) ? values[key] : null;
+    }
+
+    // Apply a hash to the state (missing or invalid values stay at their defaults), then render.
+    function loadHash(raw) {
+        var values = parseHash(raw);
+        var repoLabels = (data.repos || []).map(function (r) { return r.label; });
+        function oneOf(list) { return function (v) { return list.indexOf(v) !== -1; }; }
+        var view = hashValue(values, 'view', function (v) {
+            return Object.prototype.hasOwnProperty.call(views, v);
+        });
+        state.repo = hashValue(values, 'client', oneOf(repoLabels)) || ALL;
+        state.type = hashValue(values, 'type', oneOf(distinct(scripts, 'type'))) || ALL;
+        state.version = hashValue(values, 'version', oneOf(distinct(scripts, 'version'))) || ALL;
+        state.risk = hashValue(values, 'risk', oneOf(RISK_LEVELS)) || ALL;
+        state.search = hashValue(values, 'q', function (v) { return v.length <= MAX_QUERY; }) || '';
+        renderAll();
+        showView(view || 'inventory');
+    }
+
+    if (hasLocation() && typeof window.addEventListener === 'function') {
+        window.addEventListener('hashchange', function () {
+            var raw = String(window.location.hash || '');
+            if (raw === buildHash()) { return; }
+            loadHash(raw);
+        });
+    }
 
     // Skipped files
     var skipped = data.skipped || [];
@@ -1619,10 +1806,7 @@ main { padding: 12px 16px; }
         }, unavailable).catch(unavailable);
     }
 
-    showView('inventory');
-    renderInventory();
-    renderRecords();
-    renderRisk();
+    loadHash(hasLocation() ? window.location.hash : '');
     if (refreshUrl) { loadStatus(); }
 }());
 </script>

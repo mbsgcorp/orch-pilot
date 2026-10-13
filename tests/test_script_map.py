@@ -115,6 +115,83 @@ states.push(themeState());
 console.log(JSON.stringify(states));
 """
 
+# Shared-filter fixture on SEARCH_REPOS: hold.js (WCS) becomes a high-risk 1.0 script, so
+# RTMH has Req.Dep.js (UE 2.1 low) and req_other.js (CS 2.1 medium).
+FILTER_PRELUDE = r"""
+enableQuerySelector();
+enableNav();
+editData(function (d) {
+    d.nodes.forEach(function (n) {
+        if (n.kind === 'script' && n.name === 'hold.js') { n.version = '1.0'; n.risk.level = 'high'; }
+    });
+});
+function chipButtons() {
+    return byIdMap['repo-chips'].children.filter(function (c) { return c.tagName === 'button'; });
+}
+function chipByRepo(repo) {
+    return chipButtons().filter(function (c) { return c.textContent.split(' · ')[0] === repo; })[0];
+}
+function chipState() {
+    return chipButtons().map(function (c) {
+        return [c.textContent.split(' · ')[0], c.type, c.className, c.getAttribute('aria-pressed')];
+    });
+}
+function tileBy(id, label) {
+    return byIdMap[id].children.filter(function (c) { return c.children[0].textContent === label; })[0];
+}
+function tileState(id) {
+    return byIdMap[id].children.map(function (c) {
+        return [c.tagName, c.type, c.className, c.getAttribute('aria-pressed'),
+                c.children[0].textContent, c.children[1].children[0].textContent];
+    });
+}
+function filters() {
+    return { search: byIdMap['script-search'].value, repo: byIdMap['i-repo'].value,
+             type: byIdMap['i-type'].value, version: byIdMap['i-version'].value,
+             risk: byIdMap['i-risk'].value };
+}
+function change(id, value) {
+    byIdMap[id].value = value;
+    fire(byIdMap[id], 'change');
+}
+function riskCard(name) {
+    return byIdMap['r-grid'].children.filter(function (c) {
+        return c.className.indexOf('card') === 0 && c.children[0].textContent === name;
+    })[0];
+}
+function gridState() {
+    return byIdMap['r-grid'].children.map(function (c) {
+        if (c.className === 'r-detail') {
+            var d = c.children[0];
+            return ['r-detail', c.children.length, d.tagName, !!d.open, entryName(d)];
+        }
+        return [c.className.split(' ')[0], c.children[0].textContent, c.getAttribute('aria-expanded')];
+    });
+}
+function views() {
+    return ['view-inventory', 'view-records', 'view-risk'].filter(function (id) {
+        return !byIdMap[id].hidden;
+    });
+}
+function view() {
+    var s = snapshot();
+    return { filters: filters(), list: s.list.sort(), risk: s.risk.sort(), areas: s.areas,
+             missing: s.missing, chips: chipState(), shown: views() };
+}
+"""
+
+HASH_PRELUDE = r"""
+var HASH_WRITES = [];
+var HASH_LISTENERS = {};
+var window = {
+    location: { hash: %s },
+    history: { replaceState: function (s, t, h) { HASH_WRITES.push(h); window.location.hash = h; } },
+    addEventListener: function (type, fn) {
+        (HASH_LISTENERS[type] = HASH_LISTENERS[type] || []).push(fn);
+    }
+};
+"""
+
 
 class ScriptMapTest(unittest.TestCase):
     def setUp(self):
@@ -1822,7 +1899,7 @@ console.log(JSON.stringify(out));
             self.assertNotIn(bad, text)
         self.assertEqual(text.count(script_map.DATA_TOKEN), 1)
         for label in ("Inventory", "Records", "Risk grid", "All clients",
-                      "All types", "All versions", "Clear filters", "Total scripts",
+                      "All types", "All versions", "Clear all", "Total scripts",
                       "Pick an area to see its record types and scripts.", "In this area:",
                       "Other scripts that touch this record", "No scripts found",
                       "Order within a step follows deployment order in NetSuite, "
@@ -2328,13 +2405,15 @@ console.log(JSON.stringify(out));
         self.assertEqual(sorted(out["   "]["list"]), everyone)
         self.assertEqual(sorted(out["   "]["risk"]), everyone)
         self.assertEqual(out["hold"]["list"], ["hold.js"])
-        # Tiles and the matrix ignore the search.
-        for q in ("REQ", "req.", "zzz", "hold"):
+        # Tiles and the matrix follow the shared search like every other filter (AC 5).
+        self.assertIn("Total scripts3", out["none"]["tiles"])
+        for q, total in (("REQ", 2), ("req.", 1), ("zzz", 0), ("hold", 1)):
             with self.subTest(q=q):
-                self.assertEqual(out[q]["tiles"], out["none"]["tiles"])
-                self.assertEqual(out[q]["matrix"], out["none"]["matrix"])
+                self.assertTrue(out[q]["tiles"].startswith("Total scripts%d" % total))
                 self.assertEqual(out[q]["search"], q)
-        self.assertIn("Total scripts3", out["zzz"]["tiles"])
+        self.assertEqual(out["   "]["tiles"], out["none"]["tiles"])
+        self.assertEqual(out["   "]["matrix"], out["none"]["matrix"])
+        self.assertEqual(out["zzz"]["matrix"], "No scripts found")
 
     def test_search_does_not_match_path_or_summary(self):
         repos = {"RTMH": {"Sub/Req/ue.js": USER_EVENT}}
@@ -2361,7 +2440,9 @@ console.log(JSON.stringify(out));
         out = self.run_search_in_node(tail)
         self.assertEqual(out["type_only"]["list"], ["req_other.js"])
         self.assertEqual(out["type_and_search"]["list"], [])
-        self.assertEqual(out["type_and_search"]["risk"], ["Req.Dep.js"])
+        # The Risk grid applies the type filter too now (AC 7).
+        self.assertEqual(out["type_only"]["risk"], ["req_other.js"])
+        self.assertEqual(out["type_and_search"]["risk"], [])
         self.assertEqual(out["cleared"]["search"], "")
         self.assertEqual(out["cleared_type"], "")
         self.assertEqual(sorted(out["cleared"]["list"]), ["Req.Dep.js", "hold.js", "req_other.js"])
@@ -2445,12 +2526,16 @@ console.log(JSON.stringify(out));
 
     def test_template_controls_rows_have_ids(self):
         text = TEMPLATE.read_text(encoding="utf-8")
-        for row, select in (("i-controls", "i-repo"), ("rec-controls", "rec-repo"),
-                            ("r-controls", "r-repo")):
-            with self.subTest(row=row):
-                opening = '<div class="controls" id="%s">' % row
-                self.assertEqual(text.count(opening), 1)
-                self.assertLess(text.index(opening), text.index('<select id="%s"' % select))
+        opening = '<div class="controls" id="i-controls">'
+        self.assertEqual(text.count(opening), 1)
+        # One shared bar: the first child of <main>, before every view section.
+        main = text[text.index("<main>") + len("<main>"):]
+        self.assertTrue(main.lstrip().startswith(opening))
+        self.assertLess(text.index(opening), text.index('<section id="view-inventory"'))
+        self.assertLess(text.index(opening), text.index('<select id="i-repo"'))
+        for gone in ("rec-controls", "r-controls", "rec-repo", "r-repo"):
+            self.assertNotIn(gone, text)
+        self.assertEqual(text.count('class="controls"'), 1)
         self.assertEqual(text.count('<div class="controls">'), 0)
         header = text[text.index("<header>"):text.index("</header>")]
         self.assertNotIn("script-search", header)
@@ -2460,8 +2545,8 @@ console.log(JSON.stringify(out));
         prelude = """
 enableQuerySelector();
 enableNav();
-['i', 'rec', 'r'].forEach(function (p) {
-    document.getElementById(p + '-controls').appendChild(document.getElementById(p + '-repo'));
+['script-search', 'script-search-options', 'i-repo'].forEach(function (id) {
+    document.getElementById('i-controls').appendChild(document.getElementById(id));
 });
 """
         tail = """
@@ -2470,7 +2555,7 @@ var options = byIdMap['script-search-options'];
 function state() {
     var s = snapshot();
     return {
-        rows: ['i-controls', 'rec-controls', 'r-controls'].map(function (id) {
+        rows: ['i-controls'].map(function (id) {
             return byIdMap[id].children.map(function (c) { return c.id; });
         }),
         hidden: ['view-inventory', 'view-records', 'view-risk'].map(function (id) {
@@ -2500,14 +2585,14 @@ console.log(JSON.stringify(out));
 """
         out = self.run_header_in_node([], tail, prelude, SEARCH_REPOS)
         search = ["script-search", "script-search-options"]
-        self.assertEqual(out["start"]["rows"], [search + ["i-repo"], ["rec-repo"], ["r-repo"]])
+        # The search box stays in the one shared bar in every view.
+        self.assertEqual(out["start"]["rows"], [search + ["i-repo"]])
         self.assertEqual(out["start"]["hidden"], [False, True, True])
-        self.assertEqual(out["records"]["rows"],
-                         [["i-repo"], search + ["rec-repo"], ["r-repo"]])
+        self.assertEqual(out["records"]["rows"], [search + ["i-repo"]])
         self.assertEqual(out["records"]["hidden"], [True, False, True])
-        self.assertEqual(out["risk"]["rows"], [["i-repo"], ["rec-repo"], search + ["r-repo"]])
+        self.assertEqual(out["risk"]["rows"], [search + ["i-repo"]])
         self.assertEqual(out["risk"]["hidden"], [True, True, False])
-        self.assertEqual(out["inventory"]["rows"], [search + ["i-repo"], ["rec-repo"], ["r-repo"]])
+        self.assertEqual(out["inventory"]["rows"], [search + ["i-repo"]])
         for key in ("start", "records", "risk", "risk_hold", "inventory"):
             with self.subTest(key=key):
                 self.assertTrue(out[key]["same"])
@@ -2521,6 +2606,438 @@ console.log(JSON.stringify(out));
         self.assertEqual(out["risk_hold"]["risk"], ["hold.js"])
         self.assertEqual(out["inventory"]["value"], "hold")
         self.assertEqual(out["inventory"]["list"], ["hold.js"])
+
+    # Global filters, clickable counts, inline Risk detail and URL hash
+
+    def run_filters_in_node(self, tail, hash_=None, argv=()):
+        prelude = FILTER_PRELUDE
+        if hash_ is not None:
+            prelude = HASH_PRELUDE % json.dumps(hash_) + prelude
+        return self.run_header_in_node(list(argv), tail, prelude, SEARCH_REPOS)
+
+    def test_template_global_filter_markup_and_css(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        bar = text[text.index('<div class="controls" id="i-controls">'):]
+        bar = bar[:bar.index("</div>")]
+        ids = re.findall(r'id="([^"]+)"', bar)
+        self.assertEqual(ids, ["i-controls", "script-search", "script-search-options", "i-repo",
+                               "i-type", "i-version", "i-risk", "i-clear"])
+        self.assertIn('<select id="i-risk" aria-label="Risk filter">', bar)
+        self.assertEqual(re.findall(r'<option value="([^"]*)">([^<]*)</option>', bar),
+                         [("", "All risk"), ("high", "High"), ("medium", "Medium"),
+                          ("low", "Low")])
+        self.assertIn('<button type="button" id="i-clear">Clear all</button>', bar)
+        self.assertNotIn("Clear filters", text)
+        risk = text[text.index('<section id="view-risk"'):]
+        self.assertTrue(risk[risk.index(">") + 1:].lstrip().startswith('<div id="r-tiles"></div>'))
+        self.assertLess(risk.index('id="r-tiles"'), risk.index('id="r-grid"'))
+        self.assertEqual(self.css_rule(text, "button.tile"), {
+            "font": "inherit", "color": "inherit", "text-align": "left", "cursor": "pointer"})
+        self.assertEqual(self.css_rule(text, ".tile.sel"), {"outline": "2px solid var(--accent)"})
+        self.assertEqual(self.css_rule(text, ".tile.low"), {
+            "background": "var(--low-bg)", "border-left-color": "var(--low-border)"})
+        self.assertEqual(self.css_rule(text, ".r-detail"), {"grid-column": "1 / -1"})
+        self.assertEqual(self.css_rule(text, "#repo-chips button.chip.active"), {
+            "background": "var(--accent)", "border-color": "var(--accent)",
+            "color": "var(--accent-contrast)"})
+        self.assertEqual(self.css_rule(text, ".controls")["flex-wrap"], "wrap")
+        media = text[text.index("@media (max-width: 600px) {"):]
+        media = media[:media.index("\n}\n")]
+        self.assertIn(".controls { flex-direction: column; align-items: stretch; }", media)
+        for name in ("rec-repo", "r-repo", "openInInventory", "controlRows"):
+            self.assertNotIn(name, text)
+
+    def test_global_filters_apply_to_all_views(self):
+        tail = """
+var out = {};
+out.start = view();
+click(chipByRepo('RTMH'));
+change('i-risk', 'medium');
+out.rtmh_medium = view();
+out.rtmh_medium_records = snapshot().areas;
+change('i-risk', 'low');
+out.rtmh_low = view();
+navTo('records');
+out.records_view = view();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        everyone = ["Req.Dep.js", "hold.js", "req_other.js"]
+        self.assertEqual(out["start"]["list"], everyone)
+        self.assertEqual(out["start"]["risk"], everyone)
+        self.assertEqual(len(out["start"]["areas"]), 4)
+        medium = out["rtmh_medium"]
+        self.assertEqual(medium["filters"], {"search": "", "repo": "RTMH", "type": "",
+                                             "version": "", "risk": "medium"})
+        self.assertEqual(medium["list"], ["req_other.js"])
+        self.assertEqual(medium["risk"], ["req_other.js"])
+        self.assertEqual(medium["areas"], [["Entities", "1 scripts", "1 record types"]])
+        self.assertEqual(medium["missing"], ["RTMH: req_other.js"])
+        low = out["rtmh_low"]
+        self.assertEqual(low["list"], ["Req.Dep.js"])
+        self.assertEqual(low["risk"], ["Req.Dep.js"])
+        self.assertEqual(low["areas"], [["Sales", "1 scripts", "1 record types"],
+                                        ["Custom records", "1 scripts", "1 record types"]])
+        self.assertEqual(low["missing"], [])
+        # Switching views keeps the filters.
+        self.assertEqual(out["records_view"]["filters"], low["filters"])
+        self.assertEqual(out["records_view"]["areas"], low["areas"])
+        self.assertEqual(out["records_view"]["shown"], ["view-records"])
+
+    def test_repo_chip_toggles_client(self):
+        tail = """
+var out = {};
+out.start = view();
+click(chipByRepo('WCS'));
+out.wcs = view();
+click(chipByRepo('RTMH'));
+out.rtmh = view();
+click(chipByRepo('RTMH'));
+out.off = view();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        self.assertEqual(out["start"]["chips"], [
+            ["RTMH", "button", "chip", "false"], ["WCS", "button", "chip", "false"]])
+        self.assertEqual(out["wcs"]["chips"], [
+            ["RTMH", "button", "chip", "false"], ["WCS", "button", "chip active", "true"]])
+        self.assertEqual(out["wcs"]["filters"]["repo"], "WCS")
+        self.assertEqual(out["wcs"]["list"], ["hold.js"])
+        self.assertEqual(out["wcs"]["risk"], ["hold.js"])
+        self.assertEqual(out["rtmh"]["chips"], [
+            ["RTMH", "button", "chip active", "true"], ["WCS", "button", "chip", "false"]])
+        self.assertEqual(out["rtmh"]["list"], ["Req.Dep.js", "req_other.js"])
+        # A second click on the selected chip clears the client.
+        self.assertEqual(out["off"]["chips"], out["start"]["chips"])
+        self.assertEqual(out["off"]["filters"]["repo"], "")
+        self.assertEqual(out["off"]["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
+
+    def test_version_tile_toggles(self):
+        tail = """
+var out = {};
+out.start = tileState('i-tiles');
+click(tileBy('i-tiles', '1.0'));
+out.v10 = { tiles: tileState('i-tiles'), view: view() };
+click(tileBy('i-tiles', '1.0'));
+out.off = { tiles: tileState('i-tiles'), view: view() };
+click(tileBy('i-tiles', '2.1'));
+out.v21 = view();
+click(tileBy('i-tiles', 'Total scripts'));
+out.total = { tiles: tileState('i-tiles'), view: view() };
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        self.assertEqual(out["start"], [
+            ["button", "button", "tile sel", "true", "Total scripts", "3"],
+            ["button", "button", "tile high", "false", "1.0", "1"],
+            ["button", "button", "tile medium", "false", "2.0", "0"],
+            ["button", "button", "tile", "false", "2.x", "0"],
+            ["button", "button", "tile", "false", "2.1", "2"],
+        ])
+        # Tiles ignore the version filter, so the counts stay; the 1.0 tile is selected.
+        self.assertEqual(out["v10"]["tiles"], [
+            ["button", "button", "tile", "false", "Total scripts", "3"],
+            ["button", "button", "tile high sel", "true", "1.0", "1"],
+            ["button", "button", "tile medium", "false", "2.0", "0"],
+            ["button", "button", "tile", "false", "2.x", "0"],
+            ["button", "button", "tile", "false", "2.1", "2"],
+        ])
+        self.assertEqual(out["v10"]["view"]["filters"]["version"], "1.0")
+        self.assertEqual(out["v10"]["view"]["list"], ["hold.js"])
+        self.assertEqual(out["v10"]["view"]["risk"], ["hold.js"])
+        self.assertEqual(out["off"]["tiles"], out["start"])
+        self.assertEqual(out["off"]["view"]["filters"]["version"], "")
+        self.assertEqual(out["v21"]["filters"]["version"], "2.1")
+        self.assertEqual(out["v21"]["list"], ["Req.Dep.js", "req_other.js"])
+        self.assertEqual(out["total"]["tiles"], out["start"])
+        self.assertEqual(out["total"]["view"]["filters"]["version"], "")
+        self.assertEqual(out["total"]["view"]["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
+
+    def test_risk_tiles_count_and_toggle(self):
+        tail = """
+var out = {};
+out.start = tileState('r-tiles');
+click(tileBy('r-tiles', 'High'));
+out.high = { tiles: tileState('r-tiles'), view: view() };
+click(tileBy('r-tiles', 'High'));
+out.off = { tiles: tileState('r-tiles'), view: view() };
+click(chipByRepo('RTMH'));
+click(tileBy('r-tiles', 'Low'));
+out.rtmh_low = { tiles: tileState('r-tiles'), view: view() };
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        self.assertEqual(out["start"], [
+            ["button", "button", "tile high", "false", "High", "1"],
+            ["button", "button", "tile medium", "false", "Medium", "1"],
+            ["button", "button", "tile low", "false", "Low", "1"],
+        ])
+        # The counts ignore the risk filter itself.
+        self.assertEqual(out["high"]["tiles"], [
+            ["button", "button", "tile high sel", "true", "High", "1"],
+            ["button", "button", "tile medium", "false", "Medium", "1"],
+            ["button", "button", "tile low", "false", "Low", "1"],
+        ])
+        self.assertEqual(out["high"]["view"]["filters"]["risk"], "high")
+        self.assertEqual(out["high"]["view"]["risk"], ["hold.js"])
+        self.assertEqual(out["high"]["view"]["list"], ["hold.js"])
+        self.assertEqual(out["off"]["tiles"], out["start"])
+        self.assertEqual(out["off"]["view"]["filters"]["risk"], "")
+        self.assertEqual(out["off"]["view"]["risk"], ["Req.Dep.js", "hold.js", "req_other.js"])
+        # Other filters do apply to the counts.
+        self.assertEqual(out["rtmh_low"]["tiles"], [
+            ["button", "button", "tile high", "false", "High", "0"],
+            ["button", "button", "tile medium", "false", "Medium", "1"],
+            ["button", "button", "tile low sel", "true", "Low", "1"],
+        ])
+        self.assertEqual(out["rtmh_low"]["view"]["risk"], ["Req.Dep.js"])
+
+    def test_risk_card_detail_inline(self):
+        tail = """
+var out = {};
+navTo('risk');
+var a = riskCard('req_other.js');
+var b = riskCard('hold.js');
+out.start = gridState();
+click(a);
+out.open_a = gridState();
+out.open_a_after_card = byIdMap['r-grid'].children[byIdMap['r-grid'].children.indexOf(a) + 1].className;
+click(a);
+out.closed = gridState();
+click(a);
+click(b);
+out.open_b = gridState();
+out.open_b_after_card = byIdMap['r-grid'].children[byIdMap['r-grid'].children.indexOf(b) + 1].className;
+out.a_expanded = a.getAttribute('aria-expanded');
+var prevented = false;
+(b.listeners.keydown || []).forEach(function (fn) {
+    fn({ key: 'Enter', preventDefault: function () { prevented = true; } });
+});
+out.key_closed = gridState();
+out.prevented = prevented;
+(a.listeners.keydown || []).forEach(function (fn) { fn({ key: ' ', preventDefault: function () {} }); });
+out.key_open = gridState();
+typeSearch('');
+change('i-risk', 'low');
+change('i-risk', '');
+out.rerendered = gridState();
+out.shown = views();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        cards = [c[1] for c in out["start"]]
+        self.assertEqual(sorted(cards), ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertTrue(all(c[0] == "card" and c[2] == "false" for c in out["start"]))
+        def detail_after(state, name):
+            i = [c[1] if c[0] == "card" else None for c in state].index(name)
+            return state[i + 1]
+        self.assertEqual(sum(1 for c in out["open_a"] if c[0] == "r-detail"), 1)
+        self.assertEqual(detail_after(out["open_a"], "req_other.js"),
+                         ["r-detail", 1, "details", True, "req_other.js"])
+        self.assertEqual(out["open_a_after_card"], "r-detail")
+        self.assertIn(["card", "req_other.js", "true"], out["open_a"])
+        self.assertEqual(out["closed"], out["start"])
+        # Opening another card moves the single detail.
+        self.assertEqual(sum(1 for c in out["open_b"] if c[0] == "r-detail"), 1)
+        self.assertEqual(detail_after(out["open_b"], "hold.js"),
+                         ["r-detail", 1, "details", True, "hold.js"])
+        self.assertEqual(out["open_b_after_card"], "r-detail")
+        self.assertEqual(out["a_expanded"], "false")
+        self.assertIn(["card", "hold.js", "true"], out["open_b"])
+        # Keyboard: Enter on the open card closes it, Space opens another.
+        self.assertEqual(out["key_closed"], out["start"])
+        self.assertTrue(out["prevented"])
+        self.assertEqual(detail_after(out["key_open"], "req_other.js")[0], "r-detail")
+        # A re-render closes the detail; the view never switches away from the Risk grid.
+        self.assertEqual(out["rerendered"], out["start"])
+        self.assertEqual(out["shown"], ["view-risk"])
+
+    def test_clear_all_resets_every_filter(self):
+        tail = """
+var out = {};
+click(chipByRepo('RTMH'));
+typeSearch('req');
+change('i-type', 'UserEventScript');
+click(tileBy('i-tiles', '2.1'));
+click(tileBy('r-tiles', 'Low'));
+click(areaCard('Sales'));
+navTo('risk');
+click(riskCard('Req.Dep.js'));
+out.before = view();
+out.before_grid = gridState();
+out.before_area = byIdMap['rec-cards'].children.map(function (c) { return c.className; });
+click(byIdMap['i-clear']);
+out.after = view();
+out.after_grid = gridState();
+out.after_area = byIdMap['rec-cards'].children.map(function (c) { return c.className; });
+out.after_note = byIdMap['rec-chips'].textContent;
+out.text = byIdMap['i-clear'].textContent;
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        self.assertEqual(out["before"]["filters"], {"search": "req", "repo": "RTMH",
+                                                    "type": "UserEventScript", "version": "2.1",
+                                                    "risk": "low"})
+        self.assertEqual(out["before"]["list"], ["Req.Dep.js"])
+        self.assertIn("card area sel", out["before_area"])
+        self.assertTrue(any(c[0] == "r-detail" for c in out["before_grid"]))
+        self.assertEqual(out["after"]["filters"], {"search": "", "repo": "", "type": "",
+                                                   "version": "", "risk": ""})
+        self.assertEqual(out["after"]["chips"], [
+            ["RTMH", "button", "chip", "false"], ["WCS", "button", "chip", "false"]])
+        self.assertEqual(out["after"]["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(out["after"]["risk"], ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(len(out["after"]["areas"]), 4)
+        self.assertNotIn("card area sel", out["after_area"])
+        self.assertEqual(out["after_note"], "Pick an area to see its record types and scripts.")
+        self.assertFalse(any(c[0] == "r-detail" for c in out["after_grid"]))
+        self.assertEqual(out["after"]["shown"], ["view-risk"])
+
+    def test_hash_written_on_filter_change(self):
+        tail = """
+var out = { start: HASH_WRITES.slice() };
+click(chipByRepo('WCS'));
+out.chip = HASH_WRITES[HASH_WRITES.length - 1];
+change('i-risk', 'high');
+out.risk = HASH_WRITES[HASH_WRITES.length - 1];
+typeSearch('a&b=c d');
+out.search = HASH_WRITES[HASH_WRITES.length - 1];
+navTo('risk');
+out.view = HASH_WRITES[HASH_WRITES.length - 1];
+typeSearch('');
+click(tileBy('r-tiles', 'High'));
+click(chipByRepo('RTMH'));
+change('i-type', 'ClientScript');
+click(tileBy('i-tiles', '2.1'));
+out.all = HASH_WRITES[HASH_WRITES.length - 1];
+navTo('inventory');
+click(byIdMap['i-clear']);
+out.cleared = HASH_WRITES[HASH_WRITES.length - 1];
+out.listeners = Object.keys(HASH_LISTENERS);
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail, hash_="")
+        self.assertEqual(out["start"], [])
+        self.assertEqual(out["chip"], "#client=WCS")
+        self.assertEqual(out["risk"], "#client=WCS&risk=high")
+        self.assertEqual(out["search"], "#client=WCS&risk=high&q=a%26b%3Dc%20d")
+        self.assertEqual(out["view"], "#view=risk&client=WCS&risk=high&q=a%26b%3Dc%20d")
+        self.assertEqual(out["all"], "#view=risk&client=RTMH&type=ClientScript&version=2.1")
+        self.assertEqual(out["cleared"], "")
+        self.assertEqual(out["listeners"], ["hashchange"])
+
+    def test_hash_written_without_replace_state(self):
+        prelude_hash = "var window = { location: { hash: '' } };\n"
+        tail = """
+click(chipByRepo('WCS'));
+console.log(JSON.stringify(window.location.hash));
+"""
+        out = self.run_header_in_node([], tail, prelude_hash + FILTER_PRELUDE, SEARCH_REPOS)
+        self.assertEqual(out, "#client=WCS")
+
+    def test_hash_read_on_load_and_invalid_ignored(self):
+        tail = """
+console.log(JSON.stringify({ view: view(), writes: HASH_WRITES.slice() }));
+"""
+        valid = self.run_filters_in_node(
+            tail, hash_="#view=risk&client=WCS&type=UserEventScript&version=1.0&risk=high&q=hol")
+        self.assertEqual(valid["view"]["filters"], {
+            "search": "hol", "repo": "WCS", "type": "UserEventScript", "version": "1.0",
+            "risk": "high"})
+        self.assertEqual(valid["view"]["shown"], ["view-risk"])
+        self.assertEqual(valid["view"]["risk"], ["hold.js"])
+        self.assertEqual(valid["view"]["chips"][1], ["WCS", "button", "chip active", "true"])
+        self.assertEqual(valid["writes"], [])
+
+        cases = {
+            "invalid client": ("#client=HJL&risk=low",
+                               {"search": "", "repo": "", "type": "", "version": "",
+                                "risk": "low"}),
+            "invalid risk": ("#client=RTMH&risk=extreme",
+                             {"search": "", "repo": "RTMH", "type": "", "version": "",
+                              "risk": ""}),
+            "malformed pairs": ("#novalue&=x&q=%E0%A4%A&bogus=1&type=ClientScript&&",
+                                {"search": "", "repo": "", "type": "ClientScript",
+                                 "version": "", "risk": ""}),
+            "invalid view, type, version and long q": (
+                "#view=graph&type=Nope&version=9.9&q=" + "a" * 101,
+                {"search": "", "repo": "", "type": "", "version": "", "risk": ""}),
+            "encoded q round trip": ("#q=a%26b%3Dc",
+                                     {"search": "a&b=c", "repo": "", "type": "", "version": "",
+                                      "risk": ""}),
+            "100 char q": ("#q=" + "b" * 100,
+                           {"search": "b" * 100, "repo": "", "type": "", "version": "",
+                            "risk": ""}),
+        }
+        for name, (hash_, expected) in cases.items():
+            with self.subTest(name):
+                out = self.run_filters_in_node(tail, hash_=hash_)
+                self.assertEqual(out["view"]["filters"], expected)
+                self.assertEqual(out["view"]["shown"], ["view-inventory"])
+
+    def test_hashchange_applies_new_hash(self):
+        tail = """
+var out = {};
+window.location.hash = '#view=records&client=RTMH';
+HASH_LISTENERS.hashchange.forEach(function (fn) { fn({}); });
+out.changed = view();
+window.location.hash = '#client=Nope';
+HASH_LISTENERS.hashchange.forEach(function (fn) { fn({}); });
+out.invalid = view();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail, hash_="#risk=high")
+        self.assertEqual(out["changed"]["filters"]["repo"], "RTMH")
+        self.assertEqual(out["changed"]["filters"]["risk"], "")
+        self.assertEqual(out["changed"]["shown"], ["view-records"])
+        self.assertEqual(out["invalid"]["filters"]["repo"], "")
+        self.assertEqual(out["invalid"]["shown"], ["view-inventory"])
+
+    def test_switch_link_carries_hash(self):
+        tail = """
+function href() {
+    var toggle = header.children.filter(function (c) { return c.className === 'env-toggle'; })[0];
+    return toggle.children.filter(function (c) { return c.tagName === 'a'; })[0].getAttribute('href');
+}
+var out = { load: href() };
+click(chipByRepo('RTMH'));
+out.chip = href();
+navTo('risk');
+out.view = href();
+click(byIdMap['i-clear']);
+navTo('inventory');
+out.cleared = href();
+console.log(JSON.stringify(out));
+"""
+        argv = ["--switch-url", "/sandbox.html", "--switch-label", "Sandbox"]
+        out = self.run_filters_in_node(tail, hash_="#client=HJL&risk=low", argv=argv)
+        # HJL is not a client on this page, so it is dropped; the rest carries over.
+        self.assertEqual(out["load"], "/sandbox.html#risk=low")
+        self.assertEqual(out["chip"], "/sandbox.html#client=RTMH&risk=low")
+        self.assertEqual(out["view"], "/sandbox.html#view=risk&client=RTMH&risk=low")
+        self.assertEqual(out["cleared"], "/sandbox.html")
+
+    def test_renders_without_window(self):
+        tail = """
+var out = { window: typeof window };
+out.start = view();
+out.risk_tiles = byIdMap['r-tiles'].children.length;
+click(chipByRepo('WCS'));
+out.wcs = view();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_filters_in_node(tail)
+        self.assertEqual(out["window"], "undefined")
+        self.assertEqual(out["start"]["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(out["start"]["risk"], ["Req.Dep.js", "hold.js", "req_other.js"])
+        self.assertEqual(out["start"]["shown"], ["view-inventory"])
+        self.assertEqual(out["risk_tiles"], 3)
+        self.assertEqual(out["wcs"]["list"], ["hold.js"])
+        # A window with only localStorage (no location) also renders.
+        partial = self.run_header_in_node(
+            [], "console.log(JSON.stringify(view()));",
+            STORAGE_PRELUDE % "{}" + FILTER_PRELUDE, SEARCH_REPOS)
+        self.assertEqual(partial["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
 
     PANEL_HELP = ("Regenerate runs a fresh summary for this script. Nightly runs and Refresh "
                   "data only summarize new or changed scripts; they never redo existing "
