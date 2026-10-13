@@ -195,27 +195,27 @@ class GitInfoTest(unittest.TestCase):
 
     # Commit subject, PR number, history and GitHub remote
 
-    def test_history_of_five_with_pr(self):
+    def test_history_of_six_with_pr(self):
         repo = self.make_repo()
         shas = []
-        for day in range(1, 7):
-            message = "Fix deposit calc (#12)" if day == 6 else f"Step {day}"
+        for day in range(1, 8):
+            message = "Fix deposit calc (#12)" if day == 7 else f"Step {day}"
             shas.append(self.commit(repo, {"dep.js": str(day)},
                                     f"2026-03-0{day}T10:00:00-07:00", message=message))
         _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
         entry = data["files"]["A:dep.js"]
-        self.assertEqual(entry["commit"], shas[5])
+        self.assertEqual(entry["commit"], shas[6])
         self.assertEqual(entry["author"], "Ann Lee")
-        self.assertEqual(entry["date"], "2026-03-06T17:00:00Z")
+        self.assertEqual(entry["date"], "2026-03-07T17:00:00Z")
         self.assertEqual(entry["subject"], "Fix deposit calc (#12)")
         self.assertEqual(entry["pr"], "12")
         history = entry["history"]
-        self.assertEqual(len(history), 5)
-        self.assertEqual([item["commit"] for item in history], shas[5:0:-1])
+        self.assertEqual(len(history), 6)
+        self.assertEqual([item["commit"] for item in history], shas[6:0:-1])
         self.assertEqual(history[0], {key: entry[key] for key in
                                       ("commit", "author", "date", "subject", "pr")})
-        self.assertEqual(history[1], {"commit": shas[4], "author": "Ann Lee",
-                                      "date": "2026-03-05T17:00:00Z", "subject": "Step 5",
+        self.assertEqual(history[1], {"commit": shas[5], "author": "Ann Lee",
+                                      "date": "2026-03-06T17:00:00Z", "subject": "Step 6",
                                       "pr": ""})
         for item in history:
             self.assertEqual(sorted(item), ["author", "commit", "date", "pr", "subject"])

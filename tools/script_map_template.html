@@ -955,35 +955,41 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
             textOf(s.last_commit_pr), s.last_commit_pr_url)));
         var subject = textOf(s.last_commit_subject);
         if (subject) { box.appendChild(el('div', 'kind', subject)); }
+        var currentLinks = fileLinksRow(s.last_commit_file_url, s.last_commit_raw_url);
+        if (currentLinks) { box.appendChild(currentLinks); }
         var items = Array.isArray(s.commit_history) ? s.commit_history.filter(function (h) {
             return h && typeof h === 'object';
         }) : [];
-        if (items.length >= 2) { box.appendChild(changeHistory(items)); }
+        if (items.length >= 1) { box.appendChild(changeHistory(items)); }
         return box;
+    }
+
+    // A "change-links" <div> of the usable "View file" and "Raw" links, or null.
+    function fileLinksRow(fileUrl, rawUrl) {
+        var fileLinks = [];
+        if (usableUrl(fileUrl)) { fileLinks.push(linkOrText('View file', fileUrl)); }
+        if (usableUrl(rawUrl)) { fileLinks.push(linkOrText('Raw', rawUrl)); }
+        if (!fileLinks.length) { return null; }
+        var row = el('div', 'change-links');
+        fileLinks.forEach(function (a) { row.appendChild(a); });
+        return row;
     }
 
     function changeHistory(items) {
         var box = el('details', 'change-history');
         box.appendChild(el('summary', null, 'Change history (' + items.length + ')'));
         var list = el('ol');
-        items.forEach(function (h, index) {
+        items.forEach(function (h) {
             var item = el('li');
             var parts = [];
             var stamp = utcStamp(h.date);
             if (stamp) { parts.push(stamp); }
             if (textOf(h.author)) { parts.push(h.author); }
             commitParts(parts, textOf(h.commit), h.commit_url, textOf(h.pr), h.pr_url);
-            if (index === 0) { parts.push('current'); }
             item.appendChild(joinedLine(parts));
             if (textOf(h.subject)) { item.appendChild(el('div', 'kind', h.subject)); }
-            var fileLinks = [];
-            if (usableUrl(h.file_url)) { fileLinks.push(linkOrText('View file', h.file_url)); }
-            if (usableUrl(h.raw_url)) { fileLinks.push(linkOrText('Raw', h.raw_url)); }
-            if (fileLinks.length) {
-                var row = el('div', 'change-links');
-                fileLinks.forEach(function (a) { row.appendChild(a); });
-                item.appendChild(row);
-            }
+            var row = fileLinksRow(h.file_url, h.raw_url);
+            if (row) { item.appendChild(row); }
             list.appendChild(item);
         });
         box.appendChild(list);

@@ -35,9 +35,10 @@ The output is JSON, written atomically only after every repo succeeded:
 author name (never the email) and "date" the commit date in UTC
 ("YYYY-MM-DDTHH:MM:SSZ"). "subject" is the stripped commit subject cut to 200
 characters, "pr" the digits N when the subject ends with "(#N)" (else ""), and
-"history" holds up to 5 {commit, author, date, subject, pr} objects for the
-commits listing the path, newest first (history[0] is the last change). Keys
-match tools/script_map.py node ids, which reads the file with --git-info. One
+"history" holds up to 6 {commit, author, date, subject, pr} objects for the
+commits listing the path (the current commit plus up to 5 previous), newest
+first (history[0] is the last change). Keys match tools/script_map.py node
+ids, which reads the file with --git-info. One
 line is printed: "script_map_gitinfo: N files, R repos -> FILE". The exit
 code is 0, or 2 on any usage, input, git or write error (nothing is written
 then).
@@ -61,7 +62,7 @@ FS = "\x1f"
 GIT_TIMEOUT = 120
 MAX_STDERR = 200
 MAX_SUBJECT = 200
-MAX_HISTORY = 5
+MAX_HISTORY = 6
 PR_RE = re.compile(r"\(#([0-9]{1,9})\)$")
 _SLUG = r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?"
 SLUG_PATTERNS = (
