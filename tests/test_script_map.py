@@ -1667,7 +1667,7 @@ console.log(JSON.stringify(out));
             "date": "2026-03-01T17:05:09Z"}})
         result = self.run_header_in_node(["--git-info", str(info)], self.LAST_CHANGE_TAIL)
         self.assertEqual(result, {"ue.js": {
-            "after": "Summary", "text": "Zoë Ann · 2026-03-01 17:05 UTC · 0123456", "cls": ""}})
+            "after": "Summary", "text": "Zoë Ann · 2026-03-01 9:05 AM PST · 0123456", "cls": ""}})
 
     def test_last_change_partial_and_missing_data(self):
         repos = {"RTMH": {n: USER_EVENT for n in ("a.js", "b.js", "c.js", "d.js", "e.js",
@@ -1690,8 +1690,8 @@ console.log(JSON.stringify(out));
         unknown = {"after": "Summary", "text": "Unknown", "cls": "empty"}
         self.assertEqual(result, {
             "a.js": {"after": "Summary", "text": "Kim", "cls": ""},
-            "b.js": {"after": "Summary", "text": "2026-03-01 17:05 UTC", "cls": ""},
-            "c.js": {"after": "Summary", "text": "2026-03-01 17:05 UTC · abcdef0", "cls": ""},
+            "b.js": {"after": "Summary", "text": "2026-03-01 9:05 AM PST", "cls": ""},
+            "c.js": {"after": "Summary", "text": "2026-03-01 9:05 AM PST · abcdef0", "cls": ""},
             "d.js": {"after": "Summary", "text": "Kim · abcdef0", "cls": ""},
             "e.js": unknown,
             "f.js": unknown,
@@ -1977,7 +1977,7 @@ console.log(JSON.stringify(out));
                                    repos={"RTMH": "o/r"})
         result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
         base = "https://github.com/o/r/"
-        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 17:05 UTC · 0123456 · PR #12")
+        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 9:05 AM PST · 0123456 · PR #12")
         self.assertEqual(result["line_links"], [
             self.link("0123456", base + "commit/" + self.SHA_A),
             self.link("PR #12", base + "pull/12"),
@@ -1993,8 +1993,8 @@ console.log(JSON.stringify(out));
         items = box["items"]
         self.assertEqual([item["tag"] for item in items], ["li", "li"])
         self.assertEqual([item["line"] for item in items], [
-            "2026-03-02 09:00 UTC · Kim · 89abcde",
-            "2026-03-01 08:00 UTC · Bo · fedcba9 · PR #7",
+            "2026-03-02 1:00 AM PST · Kim · 89abcde",
+            "2026-03-01 12:00 AM PST · Bo · fedcba9 · PR #7",
         ])
         self.assertEqual(["current" in item["line"] for item in items], [False, False])
         self.assertEqual(items[0]["line_links"], [
@@ -2059,7 +2059,7 @@ console.log(JSON.stringify(out));
                                    repos={"RTMH": "o/r"})
         result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
         self.assertIsNone(result["history"])
-        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 17:05 UTC · 0123456 · PR #12")
+        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 9:05 AM PST · 0123456 · PR #12")
         self.assertEqual(result["subject"], ["Fix deposit calc (#12)"])
         self.assertEqual(result["links"], [
             self.link("View file", "https://github.com/o/r/blob/" + self.SHA_A + "/ue.js"),
@@ -2071,7 +2071,7 @@ console.log(JSON.stringify(out));
         info = self.write_git_info({"RTMH:ue.js": dict(entry, history=[entry])},
                                    repos={"RTMH": "o/r"})
         result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
-        self.assertEqual(result["line"], "Kim · 2026-03-02 09:00 UTC · 89abcde")
+        self.assertEqual(result["line"], "Kim · 2026-03-02 1:00 AM PST · 89abcde")
         self.assertEqual(result["line_links"], [
             self.link("89abcde", "https://github.com/o/r/commit/" + self.SHA_B)])
         self.assertEqual(result["subject"], [])
@@ -2194,7 +2194,7 @@ console.log(JSON.stringify(out));
         box = result["history"]
         self.assertEqual(box["summary"], "summary:Change history (1)")
         self.assertEqual([item["line"] for item in box["items"]],
-                         ["2026-03-02 09:00 UTC · Kim · 89abcde"])
+                         ["2026-03-02 1:00 AM PST · Kim · 89abcde"])
         self.assertFalse(any("current" in item["line"] for item in box["items"]))
         self.assertEqual(box["items"][0]["links"], [
             self.link("View file", base + "blob/" + self.SHA_B + "/ue.js"),
@@ -2377,7 +2377,7 @@ console.log(JSON.stringify(out));
                          {"key": "RTMH:ue.js", "author": "Kim", "guidance": ""})
         self.assertEqual(result["clicks"], [
             {"disabled_during": True, "disabled": False,
-             "status": "Already requested at 09:58 UTC. Try again after 10:08 UTC."},
+             "status": "Already requested at 2026-10-12 2:58 AM PDT. Try again after 2026-10-12 3:08 AM PDT."},
             {"disabled_during": True, "disabled": False, "status": "Request failed (HTTP 500)."},
             {"disabled_during": True, "disabled": False,
              "status": "Request failed (network error)."},
@@ -2400,11 +2400,11 @@ console.log(JSON.stringify(out));
         labels = self.run_header_in_node(
             [], "console.log(JSON.stringify(summaryLabels()));", prelude, repos)
         self.assertEqual(labels, {
-            "a.js": [" · AI summary · generated 2026-03-04 05:06 UTC"],
+            "a.js": [" · AI summary · generated 2026-03-03 9:06 PM PST"],
             "b.js": [" · AI summary"],
             "c.js": [" · AI summary"],
             "d.js": [" · From header comment"],
-            "e.js": [" · AI summary · generated 2026-03-04 05:06 UTC"],
+            "e.js": [" · AI summary · generated 2026-03-03 9:06 PM PST"],
         })
 
     def test_ai_summary_generated_suffix_via_cache(self):
@@ -2415,10 +2415,105 @@ console.log(JSON.stringify(out));
         labels = self.run_header_in_node(
             ["--summaries", str(cache)], "console.log(JSON.stringify(summaryLabels()));",
             "", {"RTMH": sources})
-        self.assertEqual(labels, {"ai.js": [" · AI summary · generated 2026-01-02 03:04 UTC"],
+        self.assertEqual(labels, {"ai.js": [" · AI summary · generated 2026-01-01 7:04 PM PST"],
                                   "hdr.js": [" · From header comment"]})
 
-    STATUS_TAIL = "afterTicks(function () { console.log(JSON.stringify(statusReport())); });"
+    # Pacific display time
+
+    def run_pacific_stamp(self, values, prelude=""):
+        """Run the template's pacificStamp on each value in node and return the results."""
+        node = shutil.which("node")
+        if node is None:
+            self.fail("node is required for the pacificStamp check but was not found")
+        text = TEMPLATE.read_text(encoding="utf-8")
+        match = re.search(r"\n    function pacificStamp\(.*?\n    }\n", text, re.DOTALL)
+        self.assertIsNotNone(match)
+        js = self.root / "pacific_check.js"
+        js.write_text(prelude + "\n" + match.group(0) + "\nconsole.log(JSON.stringify("
+                      + json.dumps(values) + ".map(pacificStamp)));\n", encoding="utf-8")
+        result = subprocess.run([node, str(js)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_pacific_stamp_formats(self):
+        cases = {
+            "2026-10-13T09:00:00Z": "2026-10-13 2:00 AM PDT",
+            "2026-07-14T17:00:00Z": "2026-07-14 10:00 AM PDT",
+            "2026-01-15T20:05:00Z": "2026-01-15 12:05 PM PST",
+            "2026-11-01T08:30:00Z": "2026-11-01 1:30 AM PDT",
+            "2026-11-01T09:30:00Z": "2026-11-01 1:30 AM PST",
+            "2026-10-13T07:00:00Z": "2026-10-13 12:00 AM PDT",
+            "2026-10-13T19:00:00Z": "2026-10-13 12:00 PM PDT",
+            "": "",
+            "not a date": "",
+        }
+        values = list(cases)
+        self.assertEqual(dict(zip(values, self.run_pacific_stamp(values))), cases)
+
+    def test_pacific_stamp_falls_back_to_utc_without_intl(self):
+        prelude = "Intl.DateTimeFormat = function () { throw new Error('no Intl'); };"
+        self.assertEqual(
+            self.run_pacific_stamp(["2026-10-13T09:00:00Z", "", "not a date"], prelude),
+            ["2026-10-13 09:00 UTC", "", ""])
+        header = self.run_header_in_node(
+            [], "console.log(JSON.stringify(byIdMap['generated'].textContent));",
+            prelude + "\neditData(function (d) { d.generated_at = '2026-10-13T09:00:00Z'; });")
+        self.assertTrue(header.startswith("Last updated "), header)
+        self.assertTrue(header.endswith(" · 2026-10-13 09:00 UTC"), header)
+
+    def test_rendered_times_are_pacific(self):
+        values = {"ue.js": {
+            "summary": "Now.", "summary_source": "ai", "summary_trigger": "first",
+            "summary_generated_at": "2026-07-14T17:00:00Z",
+            "summary_history": [{"summary": "Old.", "generated_at": "2026-01-15T20:05:00Z",
+                                 "trigger": "first", "author": "", "guidance": ""}],
+            "last_commit_author": "Kim", "last_commit_date": "2026-11-01T08:30:00Z",
+            "last_commit": self.SHA_A,
+            "commit_history": [
+                {"commit": self.SHA_A, "author": "Kim", "date": "2026-11-01T08:30:00Z"},
+                {"commit": self.SHA_B, "author": "Bo", "date": "2026-11-01T09:30:00Z"},
+            ],
+        }}
+        prelude = ("editData(function (d) { d.generated_at = '2026-10-13T09:00:00Z';"
+                   " var v = %s; d.nodes.forEach(function (n) {"
+                   " if (v[n.name]) { Object.keys(v[n.name]).forEach(function (k) {"
+                   " n[k] = v[n.name][k]; }); } }); });" % json.dumps(values))
+        tail = """
+var lines = [];
+(function collect(c) {
+    if (c.text) { lines.push(c.text); }
+    (c.children || []).forEach(function (k) {
+        if (k instanceof Text) { lines.push(k.textContent); } else { collect(k); }
+    });
+}({ children: [header, byIdMap['i-list']] }));
+console.log(JSON.stringify({
+    generated: byIdMap['generated'].textContent,
+    labels: walk(scriptEntries()[0], function (c) {
+        return c.className === 'kind' && /^ · AI summary/.test(c.textContent);
+    }).map(function (c) { return c.textContent; }),
+    extras: summaryExtras(),
+    texts: lines
+}));
+"""
+        out = self.run_header_in_node([], tail, prelude)
+        self.assertTrue(out["generated"].startswith("Last updated "), out["generated"])
+        self.assertTrue(out["generated"].endswith(" · 2026-10-13 2:00 AM PDT"),
+                        out["generated"])
+        self.assertEqual(out["labels"],
+                         [" · AI summary · first summary · generated 2026-07-14 10:00 AM PDT"])
+        self.assertEqual(out["extras"]["ue.js"]["history"]["items"],
+                         [[["", "Old."],
+                           ["kind", "first summary · generated 2026-01-15 12:05 PM PST"]]])
+        self.assertIn("2026-11-01 1:30 AM PST", out["texts"])
+        self.assertEqual([t for t in out["texts"] if "UTC" in t], [])
+        change = self.run_header_in_node([], self.CHANGE_TAIL, prelude)["ue.js"]
+        self.assertEqual(change["line"], "Kim · 2026-11-01 1:30 AM PDT · 0123456")
+        self.assertEqual([item["line"] for item in change["history"]["items"]], [
+            "2026-11-01 1:30 AM PDT · Kim · 0123456",
+            "2026-11-01 1:30 AM PST · Bo · 89abcde",
+        ])
+
+    STATUS_TAIL ="afterTicks(function () { console.log(JSON.stringify(statusReport())); });"
 
     def run_status_in_node(self, reply, argv=("--refresh-url", "/api/rebuild"),
                            generated_at="2026-10-12T10:00:00Z", tail=STATUS_TAIL):
@@ -2448,7 +2543,7 @@ console.log(JSON.stringify(out));
 
     def test_status_refresh_pending_message(self):
         cases = {
-            "2026-10-12T10:07:00Z": "Refresh requested at 10:07 UTC. New data usually within "
+            "2026-10-12T10:07:00Z": "Refresh requested at 2026-10-12 3:07 AM PDT. New data usually within "
                                     "10 minutes; reload to check.",
             "2026-10-12T10:00:00Z": "",
             "2026-10-12T09:59:59Z": "",
@@ -2487,7 +2582,7 @@ afterTicks(function () {
 });
 """
         out = self.run_status_in_node(reply, tail=tail)
-        pending = ("Regeneration requested at 10:05 UTC. New summary usually within "
+        pending = ("Regeneration requested at 2026-10-12 3:05 AM PDT. New summary usually within "
                    "10 minutes; reload to check.")
         idle = {"status": "", "disabled": False, "status_is_second": True}
         busy = {"status": pending, "disabled": False, "status_is_second": True}
@@ -3510,7 +3605,7 @@ afterTicks(function () {
             reply={"status": 429, "json": {"requested_at": "2026-10-12T09:58:00Z"}})
         self.assertTrue(out["during"])
         self.assertEqual(out["status"],
-                         "Already requested at 09:58 UTC. Try again after 10:08 UTC.")
+                         "Already requested at 2026-10-12 2:58 AM PDT. Try again after 2026-10-12 3:08 AM PDT.")
         self.assertFalse(out["disabled"])
         self.assertEqual(out["reopened"]["selected"], "Kim")
         self.assertFalse(out["reopened"]["send_disabled"])
@@ -3589,7 +3684,7 @@ afterTicks(function () {
                    " n.summary_trigger = v[n.name][1]; n.summary_author = v[n.name][2];"
                    " n.summary_generated_at = v[n.name][3]; } }); });" % json.dumps(values))
         labels = self.run_header_in_node([], self.HOW_TAIL, prelude, repos)
-        gen = " · generated 2026-03-04 05:06 UTC"
+        gen = " · generated 2026-03-03 9:06 PM PST"
         self.assertEqual(labels, {
             "a.js": [" · AI summary · first summary" + gen],
             "b.js": [" · AI summary · updated after code change" + gen],
@@ -3611,7 +3706,7 @@ afterTicks(function () {
         labels = self.run_header_in_node(
             ["--summaries", str(cache)], self.HOW_TAIL, "", {"RTMH": {"ai.js": USER_EVENT}})
         self.assertEqual(labels, {
-            "ai.js": [" · AI summary · regenerated by Kim · generated 2026-01-02 03:04 UTC"]})
+            "ai.js": [" · AI summary · regenerated by Kim · generated 2026-01-01 7:04 PM PST"]})
 
     def run_extras(self, values, argv=()):
         repos = {"RTMH": {n: USER_EVENT for n in values}}
@@ -3672,9 +3767,9 @@ afterTicks(function () {
             "summary": "summary:History (5)",
             "items": [
                 [["", "Newest."],
-                 ["kind", "regenerated by Kim · generated 2026-02-01 10:20 UTC"],
+                 ["kind", "regenerated by Kim · generated 2026-02-01 2:20 AM PST"],
                  ["kind", 'Guidance used: "Mention holds."']],
-                [["", "Middle."], ["kind", "generated 2026-01-15 08:00 UTC"]],
+                [["", "Middle."], ["kind", "generated 2026-01-15 12:00 AM PST"]],
                 [["", "Older."], ["kind", "updated after code change"]],
                 [["", "Bare."]],
                 [["", "Oldest."], ["kind", "regenerated"],
