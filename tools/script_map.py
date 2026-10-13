@@ -28,7 +28,11 @@ Every *.js file under PATH is scanned (directory symlinks are not followed;
 @NScriptType / @NApiVersion tags or nlapi calls, then parsed for entry points,
 "DEPLOY ON:" record targets, touched record types, define([...]) library
 dependencies, clientScriptModulePath and a simple risk score; each record gets
-a business-area category (see record_category). Untagged
+a business-area category (see record_category). Touched record types are
+record/search.Type.X enums and quoted customrecord* strings, plus `type: '...'`
+literals that are known record ids or sit inside a record call's arguments
+(IDENT.create/load/... ( ... ), see touched_records); other literals such as
+chart types are ignored everywhere, including the risk record count. Untagged
 SuiteScript 1.0 files get a script type inferred from their folder names. The
 result is embedded as JSON in tools/script_map_template.html and written to
 OUT. On success one summary line is printed and the exit code is 0; every
@@ -171,6 +175,10 @@ TYPE_ENUM_RE = re.compile(r"\b(?:record|search)\.Type\.([A-Za-z0-9_]+)")
 TYPE_LITERAL_RE = re.compile(r"\btype\s*:\s*(['\"])([^'\"\n]*)\1")
 RECORD_ID_RE = re.compile(r"[a-z][a-z0-9_]*")
 CUSTOMRECORD_RE = re.compile(r"(['\"])(customrecord[a-z0-9_]*)\1", re.IGNORECASE)
+RECORD_CALL_RE = re.compile(
+    r"\b[A-Za-z_$][\w$]*\.(?:create|load|copy|transform|submitFields|delete|attach|"
+    r"detach|lookupFields|newSearch)\s*\(")
+CALL_SPAN_LIMIT = 2000
 DEFINE_RE = re.compile(r"\bdefine\s*\(\s*\[")
 STRING_RE = re.compile(r"['\"]([^'\"]+)['\"]")
 CLIENT_PATH_RE = re.compile(r"\bclientScriptModulePath\s*=\s*(['\"])([^'\"]+)\1")
@@ -463,8 +471,58 @@ def deploy_targets(text):
     return targets
 
 
+def record_call_spans(text):
+    """Return [(start, end), ...] for the parenthesized arguments of each record call.
+
+    A record call is IDENT.METHOD( matching RECORD_CALL_RE. start is the "(" index and
+    end the index of its matching ")"; quoted characters (', ", `, with backslash
+    escapes) are skipped. Without a match within CALL_SPAN_LIMIT characters the span
+    ends at start + CALL_SPAN_LIMIT.
+    """
+    spans = []
+    for match in RECORD_CALL_RE.finditer(text):
+        start = match.end() - 1
+        limit = min(len(text), start + CALL_SPAN_LIMIT + 1)
+        end = start + CALL_SPAN_LIMIT
+        depth = 0
+        quote_char = None
+        i = start
+        while i < limit:
+            char = text[i]
+            if quote_char:
+                if char == "\\":
+                    i += 1
+                elif char == quote_char:
+                    quote_char = None
+            elif char in "'\"`":
+                quote_char = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+            i += 1
+        spans.append((start, end))
+    return spans
+
+
+def known_record_id(value):
+    """Return True if value is a RECORD_AREAS id, "item", an *item id, or starts with
+    customrecord or customtransaction."""
+    return (value in RECORD_AREAS or value.endswith("item")
+            or value.startswith(("customrecord", "customtransaction")))
+
+
 def touched_records(text):
-    """Return record ids referenced by record/search.Type, type: literals and customrecord strings."""
+    """Return record ids referenced by record/search.Type, type: literals and customrecord strings.
+
+    record/search.Type.X and quoted customrecord* strings always count. A `type: '...'`
+    literal counts only if it is a lowercase id outside TYPE_BLOCKLIST and either is a
+    known record id (known_record_id) or lies inside a record call's arguments
+    (record_call_spans).
+    """
     found = []
 
     def add(record_id):
@@ -473,9 +531,17 @@ def touched_records(text):
 
     for match in TYPE_ENUM_RE.finditer(text):
         add(match.group(1).lower().replace("_", ""))
+    spans = None
     for match in TYPE_LITERAL_RE.finditer(text):
         value = match.group(2)
-        if RECORD_ID_RE.fullmatch(value) and value not in TYPE_BLOCKLIST:
+        if not RECORD_ID_RE.fullmatch(value) or value in TYPE_BLOCKLIST:
+            continue
+        if known_record_id(value):
+            add(value)
+            continue
+        if spans is None:
+            spans = record_call_spans(text)
+        if any(start < match.start() < end for start, end in spans):
             add(value)
     for match in CUSTOMRECORD_RE.finditer(text):
         add(match.group(2).lower())

@@ -709,6 +709,95 @@ var u = 'CUSTOMRECORD99';
                          ["salesorder", "inventoryitem", "customer",
                           "customrecord_mbsg_hold", "customrecord99"])
 
+    def test_touched_records_drops_chart_literals(self):
+        text = ("new Chart(ctx, { type: 'bar', data: { datasets: [{ type: 'pie' }, "
+                "{ type: 'g' }] }, options: { type: 'success' } });")
+        self.assertEqual(script_map.touched_records(text), [])
+
+    def test_touched_records_counts_record_calls(self):
+        self.assertEqual(script_map.touched_records(
+            "record.load({ type: 'salesorder', id: 1 });"), ["salesorder"])
+        self.assertEqual(script_map.touched_records(
+            "rec.create({ type: 'mycustomthing' });"), ["mycustomthing"])
+        self.assertEqual(script_map.touched_records(
+            "search.lookupFields({ type: 'vendor', id: x, columns: ['x'] });"), ["vendor"])
+        self.assertEqual(script_map.touched_records(
+            "search.create({ filters: [['x', 'is', 'T']], columns: [f(1)], "
+            "type: 'transaction' });"), ["transaction"])
+
+    def test_touched_records_known_record_outside_call(self):
+        self.assertEqual(script_map.touched_records("var opts = { type: 'customer' };"),
+                         ["customer"])
+        self.assertEqual(script_map.touched_records("var opts = { type: 'widgetthing' };"), [])
+        self.assertEqual(script_map.touched_records(
+            "var a = { type: 'customrecord_abc' }; var b = { type: 'customtransaction_xyz' };"),
+            ["customrecord_abc", "customtransaction_xyz"])
+        self.assertEqual(script_map.touched_records(
+            "x = { type: 'item' }; y = { type: 'noninventoryitem' };"),
+            ["item", "noninventoryitem"])
+
+    def test_touched_records_enum_and_customrecord_unchanged(self):
+        self.assertEqual(script_map.touched_records(
+            "chart({ a: record.Type.SALES_ORDER }); var t = 'customrecord_zz';"),
+            ["salesorder", "customrecord_zz"])
+
+    def test_touched_records_skips_quoted_parens(self):
+        self.assertEqual(script_map.touched_records(
+            "record.load({ id: ')', type: 'invoice' });"), ["invoice"])
+        self.assertEqual(script_map.touched_records(
+            "record.load({ id: ')', type: 'invoicex' });"), ["invoicex"])
+        self.assertEqual(script_map.touched_records(
+            "record.load({ id: \")\", note: `a ) b`, s: 'it\\')s', type: 'widgetthing' });"),
+            ["widgetthing"])
+        self.assertEqual(script_map.touched_records(
+            "record.load({ id: 1 }); var o = { type: 'widgetthing' };"), [])
+
+    def test_touched_records_unclosed_call_limit(self):
+        near = "record.load({ " + " " * (100 - 3) + "type: 'widgetthing'"
+        self.assertEqual(near.index("type:") - near.index("("), 100)
+        self.assertEqual(script_map.touched_records(near), ["widgetthing"])
+        far = "record.load({ " + " " * (2100 - 3) + "type: 'widgetthing'"
+        self.assertEqual(far.index("type:") - far.index("("), 2100)
+        self.assertEqual(script_map.touched_records(far), [])
+
+    def test_collect_drops_chart_literals(self):
+        repo = self.make_repo("a")
+        self.write("a/Suitelet/sl.js", (
+            "/** @NScriptType Suitelet */\n"
+            "define(['N/record'], function (record) {\n"
+            "  new Chart(ctx, { type: 'bar' }); var c = { type: 'pie' };\n"
+            "  var g = { type: 'g' }; showMessage({ type: 'success' });\n"
+            "  var w = { type: 'widgetthing' }; var o = { type: 'customer' };\n"
+            "  record.load({ type: 'salesorder', id: 1 });\n"
+            "  rec.create({ type: 'mycustomthing' });\n"
+            "  search.lookupFields({ type: 'vendor', id: x, columns: ['x'] });\n"
+            "  var a = { type: 'customrecord_abc', b: 'customtransaction_xyz' };\n"
+            "  var b = { type: 'customtransaction_xyz' };\n"
+            "  var e = record.Type.INVOICE; var z = 'customrecord_zz';\n"
+            "  return { onRequest: function () {} };\n"
+            "});\n"))
+        data = self.collect_one(repo)
+        records = {n["record_id"] for n in data["nodes"] if n["kind"] == "record"}
+        self.assertEqual(records, {
+            "invoice", "salesorder", "customer", "mycustomthing", "vendor",
+            "customrecord_abc", "customtransaction_xyz", "customrecord_zz"})
+        touches = {t for s, t, k in self.edges(data) if k == "touches"}
+        for dropped in ("bar", "pie", "g", "success", "widgetthing"):
+            self.assertNotIn(f"A:{dropped}", touches)
+        self.assertIn("A:mycustomthing", touches)
+
+    def test_risk_ignores_dropped_literals(self):
+        repo = self.make_repo("a")
+        self.write("a/Suitelet/sl.js", (
+            "/** @NScriptType Suitelet */\n"
+            "try { x(); } catch (e) {}\n"
+            "new Chart(ctx, { type: 'bar' }); new Chart(ctx, { type: 'pie' });\n"
+            "new Chart(ctx, { type: 'doughnut' });\n"
+            "record.load({ type: 'salesorder', id: 1 });\n"))
+        node = self.scripts(self.collect_one(repo))["Suitelet/sl.js"]
+        self.assertFalse([r for r in node["risk"]["reasons"] if r.startswith("touches")])
+        self.assertEqual(node["risk"]["reasons"], [])
+
     def test_record_edges_and_labels(self):
         repo = self.make_repo("a")
         self.write("a/UserEvent/ue.js", USER_EVENT.replace(
