@@ -690,9 +690,73 @@ class ScriptMapTest(unittest.TestCase):
                 " * DEPLOY ON: , ()\n")
         self.assertEqual(script_map.deploy_targets(text), [
             ("customrecord2326", "Sales Order Hold"),
-            ("salesorder", "salesorder"),
+            ("salesorder", "SalesOrder"),
             ("invoice", "invoice"),
         ])
+
+    def test_deploy_targets_multi_word_names(self):
+        dt = script_map.deploy_targets
+        self.assertEqual(dt(" * DEPLOY ON: Customer Deposit\n"),
+                         [("customerdeposit", "Customer Deposit")])
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order - create only\n"),
+                         [("salesorder", "Sales Order")])
+        self.assertEqual(dt(" * DEPLOY ON: Invoice\n"), [("invoice", "Invoice")])
+        self.assertEqual(dt(" * DEPLOY ON: Item   Fulfillment\n"),
+                         [("itemfulfillment", "Item Fulfillment")])
+        self.assertEqual(dt(" * DEPLOY ON: Item \t Fulfillment\n"),
+                         [("itemfulfillment", "Item Fulfillment")])
+        self.assertEqual(dt(" * DEPLOY ON: Land\n"), [("land", "Land")])
+        self.assertEqual(dt(" * DEPLOY ON: Customer Deposit (CREATE)\n"),
+                         [("customerdeposit", "CREATE")])
+
+    def test_deploy_targets_unchanged_forms(self):
+        dt = script_map.deploy_targets
+        self.assertEqual(dt(" * DEPLOY ON: customrecord2326 (Sales Order Hold)\n"),
+                         [("customrecord2326", "Sales Order Hold")])
+        self.assertEqual(dt(" * DEPLOY ON: salesorder, invoice\n"),
+                         [("salesorder", "salesorder"), ("invoice", "invoice")])
+
+    def test_deploy_targets_separators(self):
+        dt = script_map.deploy_targets
+        expected = [("salesorder", "Sales Order"), ("invoice", "Invoice")]
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order and Invoice\n"), expected)
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order AND Invoice\n"), expected)
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order / Invoice\n"), expected)
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order; Invoice\n"), expected)
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order & Invoice\n"), expected)
+        self.assertEqual(dt(" * DEPLOY ON: customrecord_x (Billing / AR), invoice\n"),
+                         [("customrecord_x", "Billing / AR"), ("invoice", "invoice")])
+        self.assertEqual(dt(" * DEPLOY ON: -, invoice\n"), [("invoice", "invoice")])
+
+    def test_deploy_targets_name_boundaries(self):
+        dt = script_map.deploy_targets
+        self.assertEqual(dt("/** DEPLOY ON: Customer Deposit */\n"),
+                         [("customerdeposit", "Customer Deposit")])
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order* note\n"),
+                         [("salesorder", "Sales Order")])
+        self.assertEqual(dt(" * DEPLOY ON:\n"), [])
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order (open, ) x\n * DEPLOY ON: ) Invoice\n"),
+                         [("salesorder", "open,"), ("invoice", "Invoice")])
+        self.assertEqual(dt(" * DEPLOY ON: Sales Order (unclosed, invoice\n"),
+                         [("salesorder", "Sales Order")])
+
+    def test_deploy_targets_dedup_keeps_first_label(self):
+        text = " * DEPLOY ON: Sales Order\n * DEPLOY ON: salesorder\n"
+        self.assertEqual(script_map.deploy_targets(text), [("salesorder", "Sales Order")])
+
+    def test_collect_multi_word_deploy_record(self):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/cd.js",
+                   "/**\n * @NApiVersion 2.1\n * @NScriptType UserEventScript\n"
+                   " * DEPLOY ON: Customer Deposit\n */\n"
+                   "define([], () => { const beforeLoad = () => {}; return { beforeLoad }; });\n")
+        data = self.collect_one(repo)
+        records = [n for n in data["nodes"]
+                   if n["kind"] == "record" and n["record_id"] == "customerdeposit"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["category"], "Billing / AR")
+        self.assertEqual(records[0]["label"], "Customer Deposit")
+        self.assertIn(("A:UserEvent/cd.js", "A:customerdeposit", "deploy"), self.edges(data))
 
     def test_touched_records(self):
         text = """
