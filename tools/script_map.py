@@ -58,7 +58,15 @@ gets "last_commit", "last_commit_author" and "last_commit_date" from the entry
 whose key equals the node id; they are "" when there is no entry, no
 --git-info, or the field is not a string. A missing FILE prints
 "error: FILE does not exist" and an invalid one "error: FILE is not a valid git
-info file"; both exit 2.
+info file"; both exit 2. Nodes also get "last_commit_subject" and
+"last_commit_pr" from the entry's "subject" and "pr", and "commit_history"
+from its "history" (at most 5 {commit, author, date, subject, pr} objects,
+newest first, each with "commit_url", "pr_url", "file_url" and "raw_url").
+The file's top-level "repos" object maps LABEL to a GitHub "OWNER/REPO" slug;
+"last_commit_url", "last_commit_pr_url" and the history URLs start with
+LINK_ORIGIN + slug and are "" unless the slug, the 40-hex commit and the PR
+number are valid. A file without "repos" or "history" loads with "" and []
+for the new fields. Every page's data carries "link_origin" (LINK_ORIGIN).
 """
 
 import argparse
@@ -70,6 +78,7 @@ import sys
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 TEMPLATE = Path(__file__).resolve().parent / "script_map_template.html"
 DATA_TOKEN = "__SCRIPT_MAP_DATA__"
@@ -174,6 +183,12 @@ MAX_HEADER = 300
 MAX_HISTORY = 5
 HISTORY_FIELDS = ("summary", "generated_at", "trigger", "author", "guidance")
 MAX_TEAM_NAME = 40
+LINK_ORIGIN = "https://github.com/"
+SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+COMMIT_RE = re.compile(r"[0-9a-fA-F]{40}")
+PR_RE = re.compile(r"[0-9]{1,9}")
+MAX_COMMITS = 5
+COMMIT_FIELDS = ("commit", "author", "date", "subject", "pr")
 
 
 def load_summary_cache(path):
@@ -225,6 +240,51 @@ def normalize_history(value):
     if not isinstance(value, list):
         return []
     return [history_item(item) for item in value if isinstance(item, dict)][:MAX_HISTORY]
+
+
+def commit_url(slug, commit):
+    """Return the GitHub commit page URL, or "" unless slug and commit are valid."""
+    if not (SLUG_RE.fullmatch(slug) and COMMIT_RE.fullmatch(commit)):
+        return ""
+    return f"{LINK_ORIGIN}{slug}/commit/{commit}"
+
+
+def pr_url(slug, pr):
+    """Return the GitHub pull request URL, or "" unless slug and pr are valid."""
+    if not (SLUG_RE.fullmatch(slug) and PR_RE.fullmatch(pr)):
+        return ""
+    return f"{LINK_ORIGIN}{slug}/pull/{pr}"
+
+
+def file_url(slug, commit, path, kind):
+    """Return the GitHub "blob" or "raw" URL of path at commit, or "" unless slug and
+    commit are valid. The path is percent-encoded, keeping "/"."""
+    if not (SLUG_RE.fullmatch(slug) and COMMIT_RE.fullmatch(commit)):
+        return ""
+    return f"{LINK_ORIGIN}{slug}/{kind}/{commit}/{quote(path, safe='/')}"
+
+
+def commit_item(value, slug, path):
+    """Return {commit, author, date, subject, pr} from a git info history item plus its
+    commit_url, pr_url, file_url and raw_url; non-string or missing fields become ""."""
+    item = {field: value.get(field) if isinstance(value.get(field), str) else ""
+            for field in COMMIT_FIELDS}
+    item["commit_url"] = commit_url(slug, item["commit"])
+    item["pr_url"] = pr_url(slug, item["pr"])
+    item["file_url"] = file_url(slug, item["commit"], path, "blob")
+    item["raw_url"] = file_url(slug, item["commit"], path, "raw")
+    return item
+
+
+def normalize_commit_history(value, slug, path):
+    """Return a git info entry's "history" as at most MAX_COMMITS commit items.
+
+    A value that is not a list gives []; items that are not objects are dropped.
+    """
+    if not isinstance(value, list):
+        return []
+    items = [item for item in value if isinstance(item, dict)][:MAX_COMMITS]
+    return [commit_item(item, slug, path) for item in items]
 
 
 def header_description(text):
@@ -521,16 +581,19 @@ def js_files(root, errors=None):
             yield full.relative_to(root).as_posix(), full
 
 
-def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None):
+def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None,
+            git_repos=None):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
     branch is the branch each repo's HEAD is expected to name.
     summary_namespace, when non-empty, prefixes each script's summary_key with "NAME|".
-    git_info is the "files" dict of a git info file (see load_git_info).
+    git_info is the "files" dict of a git info file (see load_git_info) and
+    git_repos its "repos" dict of LABEL -> GitHub "OWNER/REPO" slug.
     """
     summaries = summaries or {}
     git_info = git_info or {}
+    git_repos = git_repos or {}
     key_prefix = f"{summary_namespace}|" if summary_namespace else ""
     by_sha = {}
     for key in sorted(summaries):
@@ -641,6 +704,12 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
             last_commit, last_author, last_date = (
                 last.get(field) if isinstance(last.get(field), str) else ""
                 for field in ("commit", "author", "date"))
+            last_subject, last_pr = (
+                last.get(field) if isinstance(last.get(field), str) else ""
+                for field in ("subject", "pr"))
+            slug = git_repos.get(label)
+            if not isinstance(slug, str):
+                slug = ""
 
             type_inferred = False
             if script_type == "SuiteScript 1.0":
@@ -673,6 +742,11 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
                 "last_commit": last_commit,
                 "last_commit_author": last_author,
                 "last_commit_date": last_date,
+                "last_commit_subject": last_subject,
+                "last_commit_pr": last_pr,
+                "last_commit_url": commit_url(slug, last_commit),
+                "last_commit_pr_url": pr_url(slug, last_pr),
+                "commit_history": normalize_commit_history(last.get("history"), slug, rel),
             })
 
         nodes.extend(script_nodes)
@@ -821,9 +895,12 @@ def main(argv=None):
             return 2
 
     git_files = None
+    git_repos = None
     if args.git_info is not None:
         try:
-            git_files = load_git_info(args.git_info)["files"]
+            info = load_git_info(args.git_info)
+            git_files = info["files"]
+            git_repos = info.get("repos") if isinstance(info.get("repos"), dict) else {}
         except FileNotFoundError:
             print(f"error: {args.git_info} does not exist", file=sys.stderr)
             return 2
@@ -833,7 +910,7 @@ def main(argv=None):
 
     try:
         data = collect(repos, entries, args.branch, args.summary_namespace,
-                       git_info=git_files)
+                       git_info=git_files, git_repos=git_repos)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"
@@ -851,6 +928,7 @@ def main(argv=None):
     data["missing_repos"] = args.missing_repo or []
     data["branch"] = args.branch
     data["team"] = sorted(set(team), key=lambda name: (name.casefold(), name))
+    data["link_origin"] = LINK_ORIGIN
     data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         page = render(data)

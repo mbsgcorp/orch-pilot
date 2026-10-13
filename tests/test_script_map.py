@@ -1029,7 +1029,8 @@ var u = 'CUSTOMRECORD99';
             "version", "entry_points", "modules", "has_deploy_line", "risk", "summary",
             "summary_source", "summary_generated_at", "summary_key", "summary_trigger",
             "summary_author", "summary_guidance", "summary_history", "last_commit",
-            "last_commit_author", "last_commit_date"]))
+            "last_commit_author", "last_commit_date", "last_commit_subject", "last_commit_pr",
+            "last_commit_url", "last_commit_pr_url", "commit_history"]))
 
     # Summary trigger, author, guidance and history; --team
 
@@ -1217,7 +1218,7 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(sorted(data), sorted([
             "repos", "nodes", "edges", "skipped", "record_categories", "title", "refresh_url",
             "environment", "switch_url", "switch_label", "missing_repos", "branch", "team",
-            "generated_at"]))
+            "generated_at", "link_origin"]))
 
     def test_help_mentions_team(self):
         result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
@@ -1321,10 +1322,12 @@ var u = 'CUSTOMRECORD99';
 
     # Git last change: --git-info
 
-    def write_git_info(self, files, name="gitinfo.json", version=1):
+    def write_git_info(self, files, name="gitinfo.json", version=1, repos=None):
         path = self.root / name
-        path.write_text(json.dumps({"version": version, "generated_at": "2026-01-01T00:00:00Z",
-                                    "files": files}), encoding="utf-8")
+        info = {"version": version, "generated_at": "2026-01-01T00:00:00Z", "files": files}
+        if repos is not None:
+            info["repos"] = repos
+        path.write_text(json.dumps(info), encoding="utf-8")
         return path
 
     def test_help_mentions_git_info(self):
@@ -1463,6 +1466,352 @@ console.log(JSON.stringify(out));
             "f.js": unknown,
             "g.js": unknown,
         })
+
+    # GitHub links: subject, PR, commit history and URLs
+
+    SHA_A = "0123456789abcdef0123456789abcdef01234567"
+    SHA_B = "89abcdef0123456789abcdef0123456789abcdef"
+    SHA_C = "fedcba9876543210fedcba9876543210fedcba98"
+
+    def commit_entry(self, sha, author, date, subject, pr, history=None):
+        entry = {"commit": sha, "author": author, "date": date, "subject": subject, "pr": pr}
+        if history is not None:
+            entry["history"] = history
+        return entry
+
+    def three_commits(self):
+        return [
+            self.commit_entry(self.SHA_A, "Zoë Ann", "2026-03-03T17:05:09Z",
+                              "Fix deposit calc (#12)", "12"),
+            self.commit_entry(self.SHA_B, "Kim", "2026-03-02T09:00:00Z", "Tidy", ""),
+            self.commit_entry(self.SHA_C, "Bo", "2026-03-01T08:00:00Z", "Start (#7)", "7"),
+        ]
+
+    def test_link_origin_on_every_page(self):
+        self.assertEqual(script_map.LINK_ORIGIN, "https://github.com/")
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        info = self.write_git_info({}, repos={"A": "o/r"})
+        for extra in ([], ["--git-info", str(info)], ["--branch", "main"]):
+            with self.subTest(extra=extra):
+                code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)]
+                                             + extra)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.read_data()[1]["link_origin"], "https://github.com/")
+
+    def test_commit_links_and_history_urls(self):
+        repo = self.make_repo("a")
+        self.write("a/Client Scripts/a b.js", USER_EVENT)
+        history = self.three_commits()
+        files = {"A:Client Scripts/a b.js": dict(history[0], history=history)}
+        node = self.scripts(script_map.collect([("A", repo)], git_info=files,
+                                               git_repos={"A": "o/r"}))["Client Scripts/a b.js"]
+        base = "https://github.com/o/r/"
+        self.assertEqual(node["last_commit"], self.SHA_A)
+        self.assertEqual(node["last_commit_author"], "Zoë Ann")
+        self.assertEqual(node["last_commit_date"], "2026-03-03T17:05:09Z")
+        self.assertEqual(node["last_commit_subject"], "Fix deposit calc (#12)")
+        self.assertEqual(node["last_commit_pr"], "12")
+        self.assertEqual(node["last_commit_url"], base + "commit/" + self.SHA_A)
+        self.assertEqual(node["last_commit_pr_url"], base + "pull/12")
+        self.assertEqual(len(node["commit_history"]), 3)
+        self.assertEqual(node["commit_history"][0], {
+            "commit": self.SHA_A, "author": "Zoë Ann", "date": "2026-03-03T17:05:09Z",
+            "subject": "Fix deposit calc (#12)", "pr": "12",
+            "commit_url": base + "commit/" + self.SHA_A,
+            "pr_url": base + "pull/12",
+            "file_url": base + "blob/" + self.SHA_A + "/Client%20Scripts/a%20b.js",
+            "raw_url": base + "raw/" + self.SHA_A + "/Client%20Scripts/a%20b.js",
+        })
+        self.assertEqual(node["commit_history"][1]["pr_url"], "")
+        self.assertEqual(node["commit_history"][1]["file_url"],
+                         base + "blob/" + self.SHA_B + "/Client%20Scripts/a%20b.js")
+        self.assertEqual(node["commit_history"][2]["pr_url"], base + "pull/7")
+
+    def test_commit_links_via_main(self):
+        repo = self.make_repo("a")
+        self.write("a/Client Scripts/a b.js", USER_EVENT)
+        history = self.three_commits()
+        info = self.write_git_info({"A:Client Scripts/a b.js": dict(history[0], history=history)},
+                                   repos={"A": "o/r"})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(info)])
+        self.assertEqual(code, 0, err)
+        node = self.scripts(self.read_data()[1])["Client Scripts/a b.js"]
+        self.assertEqual(node["last_commit_url"], "https://github.com/o/r/commit/" + self.SHA_A)
+        self.assertEqual(node["commit_history"][0]["raw_url"],
+                         "https://github.com/o/r/raw/" + self.SHA_A + "/Client%20Scripts/a%20b.js")
+        self.assertEqual([h["commit"] for h in node["commit_history"]],
+                         [self.SHA_A, self.SHA_B, self.SHA_C])
+
+    def test_special_characters_in_path_are_quoted(self):
+        repo = self.make_repo("a")
+        self.write("a/Sub/Ordér #1?.js", USER_EVENT)
+        files = {"A:Sub/Ordér #1?.js": dict(self.three_commits()[0],
+                                            history=self.three_commits()[:1])}
+        node = self.scripts(script_map.collect([("A", repo)], git_info=files,
+                                               git_repos={"A": "o/r"}))["Sub/Ordér #1?.js"]
+        self.assertEqual(node["commit_history"][0]["file_url"],
+                         "https://github.com/o/r/blob/" + self.SHA_A
+                         + "/Sub/Ord%C3%A9r%20%231%3F.js")
+
+    def test_invalid_slug_commit_and_pr_blank_only_affected_urls(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+
+        def node_for(entry, slug):
+            files = {"A:ue.js": dict(entry, history=[entry])}
+            return self.scripts(script_map.collect([("A", repo)], git_info=files,
+                                                   git_repos={"A": slug}))["ue.js"]
+
+        good = self.three_commits()[0]
+        for slug in ("o", "o/r/x", "../r?", "", "o/r#x", " o/r"):
+            with self.subTest(slug=slug):
+                node = node_for(good, slug)
+                item = node["commit_history"][0]
+                self.assertEqual((node["last_commit_url"], node["last_commit_pr_url"]), ("", ""))
+                self.assertEqual((item["commit_url"], item["pr_url"], item["file_url"],
+                                  item["raw_url"]), ("", "", "", ""))
+                self.assertEqual((node["last_commit"], node["last_commit_pr"]),
+                                 (self.SHA_A, "12"))
+        for commit in ("abc123", "g" * 40, self.SHA_A + "0", "javascript:alert(1)"):
+            with self.subTest(commit=commit):
+                node = node_for(dict(good, commit=commit), "o/r")
+                item = node["commit_history"][0]
+                self.assertEqual(node["last_commit_url"], "")
+                self.assertEqual((item["commit_url"], item["file_url"], item["raw_url"]),
+                                 ("", "", ""))
+                self.assertEqual(node["last_commit_pr_url"], "https://github.com/o/r/pull/12")
+                self.assertEqual(item["pr_url"], "https://github.com/o/r/pull/12")
+        for pr in ("12a", "1234567890", "-1", "#12", ""):
+            with self.subTest(pr=pr):
+                node = node_for(dict(good, pr=pr), "o/r")
+                item = node["commit_history"][0]
+                self.assertEqual((node["last_commit_pr_url"], item["pr_url"]), ("", ""))
+                self.assertEqual(node["last_commit_url"],
+                                 "https://github.com/o/r/commit/" + self.SHA_A)
+                self.assertEqual(item["commit_url"], "https://github.com/o/r/commit/" + self.SHA_A)
+
+    def test_repos_and_history_malformed_values(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        good = self.three_commits()[0]
+        many = [dict(good) for _ in range(7)]
+        cases = [
+            ("not a list", []),
+            (None, []),
+            ([1, "x", None, {"commit": 5, "author": ["x"]}], [{
+                "commit": "", "author": "", "date": "", "subject": "", "pr": "",
+                "commit_url": "", "pr_url": "", "file_url": "", "raw_url": ""}]),
+            (many, None),
+        ]
+        for history, expected in cases:
+            with self.subTest(history=history):
+                files = {"A:ue.js": dict(good, history=history)}
+                node = self.scripts(script_map.collect([("A", repo)], git_info=files,
+                                                       git_repos={"A": "o/r"}))["ue.js"]
+                if expected is None:
+                    self.assertEqual(len(node["commit_history"]), 5)
+                else:
+                    self.assertEqual(node["commit_history"], expected)
+        for repos in ([1], "o/r", None, {"A": 5}, {"B": "o/r"}):
+            with self.subTest(repos=repos):
+                info = self.write_git_info({"A:ue.js": dict(good, history=[good])}, repos=repos)
+                code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                              "--git-info", str(info)])
+                self.assertEqual(code, 0, err)
+                node = self.scripts(self.read_data()[1])["ue.js"]
+                self.assertEqual((node["last_commit_url"], node["last_commit_pr_url"]), ("", ""))
+                self.assertEqual(node["commit_history"][0]["commit_url"], "")
+                self.assertEqual(node["last_commit_subject"], "Fix deposit calc (#12)")
+        files = {"A:ue.js": dict(good, subject=5, pr=None)}
+        node = self.scripts(script_map.collect([("A", repo)], git_info=files,
+                                               git_repos={"A": "o/r"}))["ue.js"]
+        self.assertEqual((node["last_commit_subject"], node["last_commit_pr"],
+                          node["last_commit_pr_url"]), ("", "", ""))
+
+    def test_old_format_git_info_loads_unchanged(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        self.write("a/none.js", USER_EVENT)
+        info = self.write_git_info({"A:ue.js": {"commit": "a" * 40, "author": "Zoë Ann",
+                                                "date": "2026-03-01T17:00:00Z"}})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(info)])
+        self.assertEqual(code, 0, err)
+        nodes = self.scripts(self.read_data()[1])
+        for name, last in (("ue.js", ("a" * 40, "Zoë Ann", "2026-03-01T17:00:00Z")),
+                           ("none.js", ("", "", ""))):
+            with self.subTest(name=name):
+                node = nodes[name]
+                self.assertEqual((node["last_commit"], node["last_commit_author"],
+                                  node["last_commit_date"]), last)
+                self.assertEqual((node["last_commit_subject"], node["last_commit_pr"],
+                                  node["last_commit_url"], node["last_commit_pr_url"],
+                                  node["commit_history"]), ("", "", "", "", []))
+
+    def test_script_map_never_runs_git(self):
+        text = (TOOLS_DIR / "script_map.py").read_text(encoding="utf-8")
+        self.assertNotIn("subprocess", text)
+
+    CHANGE_TAIL = """
+function linkInfo(c) {
+    return { tag: c.tagName, text: c.textContent, href: c.getAttribute('href'),
+             target: c.getAttribute('target'), rel: c.getAttribute('rel') };
+}
+function tagged(root, tags) {
+    return walk(root, function (c) { return tags.indexOf(c.tagName) !== -1; });
+}
+var out = {};
+scriptEntries().forEach(function (d) {
+    var dl = walk(d, function (c) { return c.tagName === 'dl'; })[0];
+    var labels = dl.children.map(function (c) { return c.tagName === 'dt' ? c.textContent : null; });
+    var dd = dl.children[labels.indexOf('Last change') + 1];
+    var top = dd.children[0];
+    var box = walk(dd, function (c) { return c.className === 'change-history'; })[0];
+    var history = null;
+    if (box) {
+        var list = box.children[1];
+        history = {
+            tag: box.tagName,
+            open: box.getAttribute('open'),
+            summary: box.children[0].tagName + ':' + box.children[0].textContent,
+            list_tag: list.tagName,
+            items: list.children.map(function (li) {
+                var row = li.children.filter(function (c) { return c.className === 'change-links'; })[0];
+                return {
+                    tag: li.tagName,
+                    line: li.children[0].textContent,
+                    line_links: tagged(li.children[0], ['a', 'span']).map(linkInfo),
+                    subject: li.children.filter(function (c) { return c.className === 'kind'; })
+                        .map(function (c) { return c.textContent; }),
+                    links: row ? tagged(row, ['a', 'span']).map(linkInfo) : null
+                };
+            })
+        };
+    }
+    out[entryName(d)] = {
+        line: top.children[0] ? top.children[0].textContent : dd.textContent,
+        line_links: top.children[0] ? tagged(top.children[0], ['a', 'span']).map(linkInfo) : [],
+        subject: top.children.filter(function (c) { return c.className === 'kind'; })
+            .map(function (c) { return c.textContent; }),
+        history: history
+    };
+});
+console.log(JSON.stringify(out));
+"""
+
+    def link(self, text, href):
+        if href is None:
+            return {"tag": "span", "text": text, "href": None, "target": None, "rel": None}
+        return {"tag": "a", "text": text, "href": href, "target": "_blank",
+                "rel": "noopener noreferrer"}
+
+    def test_last_change_links_and_change_history_render(self):
+        history = self.three_commits()
+        info = self.write_git_info({"RTMH:ue.js": dict(history[0], history=history)},
+                                   repos={"RTMH": "o/r"})
+        result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
+        base = "https://github.com/o/r/"
+        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 17:05 UTC · 0123456 · PR #12")
+        self.assertEqual(result["line_links"], [
+            self.link("0123456", base + "commit/" + self.SHA_A),
+            self.link("PR #12", base + "pull/12"),
+        ])
+        self.assertEqual(result["subject"], ["Fix deposit calc (#12)"])
+        box = result["history"]
+        self.assertEqual((box["tag"], box["open"], box["summary"], box["list_tag"]),
+                         ("details", None, "summary:Change history (3)", "ol"))
+        items = box["items"]
+        self.assertEqual([item["tag"] for item in items], ["li", "li", "li"])
+        self.assertEqual([item["line"] for item in items], [
+            "2026-03-03 17:05 UTC · Zoë Ann · 0123456 · PR #12 · current",
+            "2026-03-02 09:00 UTC · Kim · 89abcde",
+            "2026-03-01 08:00 UTC · Bo · fedcba9 · PR #7",
+        ])
+        self.assertEqual([item["line"].endswith(" · current") for item in items],
+                         [True, False, False])
+        self.assertEqual(items[0]["line_links"], [
+            self.link("0123456", base + "commit/" + self.SHA_A),
+            self.link("PR #12", base + "pull/12"),
+        ])
+        self.assertEqual([item["subject"] for item in items],
+                         [["Fix deposit calc (#12)"], ["Tidy"], ["Start (#7)"]])
+        for item, sha in zip(items, (self.SHA_A, self.SHA_B, self.SHA_C)):
+            self.assertEqual(item["links"], [
+                self.link("View file", base + "blob/" + sha + "/ue.js"),
+                self.link("Raw", base + "raw/" + sha + "/ue.js"),
+            ])
+
+    def test_unsafe_or_missing_urls_render_as_text(self):
+        history = self.three_commits()
+        info = self.write_git_info({"RTMH:ue.js": dict(history[0], history=history)},
+                                   repos={"RTMH": "o/r"})
+        prelude = ("editData(function (d) { d.nodes.forEach(function (n) {"
+                   " if (n.kind !== 'script') { return; }"
+                   " n.last_commit_url = 'javascript:alert(1)';"
+                   " n.last_commit_pr_url = 'https://github.com/';"
+                   " n.commit_history[0].commit_url = 'javascript:alert(1)';"
+                   " n.commit_history[0].pr_url = 5;"
+                   " n.commit_history[0].file_url = '';"
+                   " n.commit_history[0].raw_url = 'https://evil.example/x';"
+                   " n.commit_history[1].raw_url = '';"
+                   " }); });")
+        result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL,
+                                         prelude)["ue.js"]
+        base = "https://github.com/o/r/"
+        self.assertEqual(result["line_links"], [self.link("0123456", None),
+                                                self.link("PR #12", None)])
+        items = result["history"]["items"]
+        self.assertEqual(items[0]["line_links"], [self.link("0123456", None),
+                                                  self.link("PR #12", None)])
+        self.assertIsNone(items[0]["links"])
+        self.assertEqual(items[1]["links"],
+                         [self.link("View file", base + "blob/" + self.SHA_B + "/ue.js")])
+        self.assertEqual(items[2]["line_links"][0],
+                         self.link("fedcba9", base + "commit/" + self.SHA_C))
+
+    def test_no_link_origin_renders_text_only(self):
+        history = self.three_commits()
+        info = self.write_git_info({"RTMH:ue.js": dict(history[0], history=history)},
+                                   repos={"RTMH": "o/r"})
+        prelude = "editData(function (d) { delete d.link_origin; });"
+        result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL,
+                                         prelude)["ue.js"]
+        self.assertEqual(result["line_links"], [self.link("0123456", None),
+                                                self.link("PR #12", None)])
+        self.assertTrue(all(item["links"] is None for item in result["history"]["items"]))
+
+    def test_one_history_item_renders_no_change_history(self):
+        history = self.three_commits()[:1]
+        info = self.write_git_info({"RTMH:ue.js": dict(history[0], history=history)},
+                                   repos={"RTMH": "o/r"})
+        result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
+        self.assertIsNone(result["history"])
+        self.assertEqual(result["line"], "Zoë Ann · 2026-03-03 17:05 UTC · 0123456 · PR #12")
+        self.assertEqual(result["subject"], ["Fix deposit calc (#12)"])
+
+    def test_last_change_without_pr_or_subject(self):
+        entry = self.commit_entry(self.SHA_B, "Kim", "2026-03-02T09:00:00Z", "", "")
+        info = self.write_git_info({"RTMH:ue.js": dict(entry, history=[entry])},
+                                   repos={"RTMH": "o/r"})
+        result = self.run_header_in_node(["--git-info", str(info)], self.CHANGE_TAIL)["ue.js"]
+        self.assertEqual(result["line"], "Kim · 2026-03-02 09:00 UTC · 89abcde")
+        self.assertEqual(result["line_links"], [
+            self.link("89abcde", "https://github.com/o/r/commit/" + self.SHA_B)])
+        self.assertEqual(result["subject"], [])
+        self.assertIsNone(result["history"])
+
+    def test_nested_details_and_link_css(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("#i-list details details, #rec-list details details {\n"
+                      "    border: 0;\n    border-radius: 0;\n    background: none;\n"
+                      "    padding: 0;\n    margin: 4px 0 0;\n}", text)
+        self.assertIn("#i-list a, #rec-list a { color: var(--accent); }", text)
+        self.assertIn(".change-history { margin-top: 4px; overflow-wrap: anywhere;", text)
+        self.assertIn("var linkOrigin = String(data.link_origin || '');", text)
+        self.assertIn("Change history (", text)
+        self.assertEqual(text.count("<script"), 2)
 
     # AC10 / AC16: template
 

@@ -193,6 +193,14 @@ main { padding: 12px 16px; }
     padding: 6px 10px;
     margin-bottom: 6px;
 }
+#i-list details details, #rec-list details details {
+    border: 0;
+    border-radius: 0;
+    background: none;
+    padding: 0;
+    margin: 4px 0 0;
+}
+#i-list a, #rec-list a { color: var(--accent); }
 #i-list summary, #rec-list summary { cursor: pointer; }
 #i-list .name, #rec-list .name { font-weight: 600; word-break: break-word; }
 #i-list .path, #rec-list .path { display: block; margin-left: 0; }
@@ -245,6 +253,11 @@ main { padding: 12px 16px; }
 .summary-history summary { color: var(--muted); font-size: 12px; cursor: pointer; }
 .summary-history ol { margin: 4px 0 0; padding-left: 18px; }
 .summary-history li { margin-bottom: 4px; }
+.change-history { margin-top: 4px; overflow-wrap: anywhere; word-break: break-word; }
+.change-history summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.change-history ol { margin: 4px 0 0; padding-left: 18px; }
+.change-history li { margin-bottom: 4px; }
+.change-links { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
 #rec-missing { margin-bottom: 8px; }
 #rec-cards {
     display: grid;
@@ -373,6 +386,7 @@ main { padding: 12px 16px; }
     'use strict';
 
     var data = JSON.parse(document.getElementById('script-map-data').textContent);
+    var linkOrigin = String(data.link_origin || '');
     var LANES = ['beforeLoad', 'beforeSubmit', 'afterSubmit', 'pageInit', 'fieldChanged',
         'postSourcing', 'sublistChanged', 'lineInit', 'validateField', 'validateLine',
         'validateInsert', 'validateDelete', 'saveRecord'];
@@ -825,23 +839,95 @@ main { padding: 12px 16px; }
         dl.appendChild(dd);
     }
 
-    function lastChange(s) {
+    // "YYYY-MM-DD HH:MM UTC" for an ISO date string, or '' when it does not parse.
+    function utcStamp(value) {
         function pad(n) { return (n < 10 ? '0' : '') + n; }
+        var when = typeof value === 'string' ? Date.parse(value) : NaN;
+        if (isNaN(when)) { return ''; }
+        var d = new Date(when);
+        return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' +
+            pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' +
+            pad(d.getUTCMinutes()) + ' UTC';
+    }
+
+    function usableUrl(url) {
+        return typeof url === 'string' && linkOrigin !== '' &&
+            url.indexOf(linkOrigin) === 0 && url.length > linkOrigin.length;
+    }
+
+    // An <a> opening url in a new tab when it is a usable link, else plain text.
+    function linkOrText(text, url, className) {
+        if (!usableUrl(url)) { return el('span', className, text); }
+        var a = el('a', className, text);
+        a.setAttribute('href', url);
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+        return a;
+    }
+
+    function textOf(value) { return typeof value === 'string' ? value : ''; }
+
+    // A <div> of the given strings and nodes joined with " · ".
+    function joinedLine(parts) {
+        var line = el('div');
+        parts.forEach(function (part, i) {
+            if (i) { line.appendChild(document.createTextNode(' · ')); }
+            line.appendChild(typeof part === 'string' ? document.createTextNode(part) : part);
+        });
+        return line;
+    }
+
+    // The sha7 and optional "PR #N" parts of a change line, linked when usable.
+    function commitParts(parts, commit, commitUrl, pr, prUrl) {
+        if (commit) { parts.push(linkOrText(commit.slice(0, 7), commitUrl)); }
+        if (pr) { parts.push(linkOrText('PR #' + pr, prUrl)); }
+        return parts;
+    }
+
+    function lastChange(s) {
         var parts = [];
-        if (typeof s.last_commit_author === 'string' && s.last_commit_author) {
-            parts.push(s.last_commit_author);
-        }
-        var when = typeof s.last_commit_date === 'string' ? Date.parse(s.last_commit_date) : NaN;
-        if (!isNaN(when)) {
-            var d = new Date(when);
-            parts.push(d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' +
-                pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' +
-                pad(d.getUTCMinutes()) + ' UTC');
-        }
-        if (parts.length && typeof s.last_commit === 'string' && s.last_commit) {
-            parts.push(s.last_commit.slice(0, 7));
-        }
-        return parts.length ? parts.join(' · ') : el('span', 'empty', 'Unknown');
+        if (textOf(s.last_commit_author)) { parts.push(s.last_commit_author); }
+        var stamp = utcStamp(s.last_commit_date);
+        if (stamp) { parts.push(stamp); }
+        if (!parts.length) { return el('span', 'empty', 'Unknown'); }
+        var box = el('div');
+        box.appendChild(joinedLine(commitParts(parts, textOf(s.last_commit), s.last_commit_url,
+            textOf(s.last_commit_pr), s.last_commit_pr_url)));
+        var subject = textOf(s.last_commit_subject);
+        if (subject) { box.appendChild(el('div', 'kind', subject)); }
+        var items = Array.isArray(s.commit_history) ? s.commit_history.filter(function (h) {
+            return h && typeof h === 'object';
+        }) : [];
+        if (items.length >= 2) { box.appendChild(changeHistory(items)); }
+        return box;
+    }
+
+    function changeHistory(items) {
+        var box = el('details', 'change-history');
+        box.appendChild(el('summary', null, 'Change history (' + items.length + ')'));
+        var list = el('ol');
+        items.forEach(function (h, index) {
+            var item = el('li');
+            var parts = [];
+            var stamp = utcStamp(h.date);
+            if (stamp) { parts.push(stamp); }
+            if (textOf(h.author)) { parts.push(h.author); }
+            commitParts(parts, textOf(h.commit), h.commit_url, textOf(h.pr), h.pr_url);
+            if (index === 0) { parts.push('current'); }
+            item.appendChild(joinedLine(parts));
+            if (textOf(h.subject)) { item.appendChild(el('div', 'kind', h.subject)); }
+            var fileLinks = [];
+            if (usableUrl(h.file_url)) { fileLinks.push(linkOrText('View file', h.file_url)); }
+            if (usableUrl(h.raw_url)) { fileLinks.push(linkOrText('Raw', h.raw_url)); }
+            if (fileLinks.length) {
+                var row = el('div', 'change-links');
+                fileLinks.forEach(function (a) { row.appendChild(a); });
+                item.appendChild(row);
+            }
+            list.appendChild(item);
+        });
+        box.appendChild(list);
+        return box;
     }
 
     function recordList(s) {

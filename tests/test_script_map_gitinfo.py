@@ -90,9 +90,15 @@ class GitInfoTest(unittest.TestCase):
         third = self.commit(repo, {"b.js": "3"}, "2026-03-03T10:00:00-07:00")
         self.commit(repo, {"notes.txt": "x"}, "2026-03-04T10:00:00-07:00")
         _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        a_last = {"commit": second, "author": "Bo Chan", "date": "2026-03-02T17:00:00Z",
+                  "subject": "change", "pr": ""}
+        a_first = {"commit": first, "author": "Ann Lee", "date": "2026-03-01T17:00:00Z",
+                   "subject": "change", "pr": ""}
+        b_last = {"commit": third, "author": "Ann Lee", "date": "2026-03-03T17:00:00Z",
+                  "subject": "change", "pr": ""}
         self.assertEqual(data["files"], {
-            "A:a.js": {"commit": second, "author": "Bo Chan", "date": "2026-03-02T17:00:00Z"},
-            "A:b.js": {"commit": third, "author": "Ann Lee", "date": "2026-03-03T17:00:00Z"},
+            "A:a.js": dict(a_last, history=[a_last, a_first]),
+            "A:b.js": dict(b_last, history=[b_last, dict(a_first)]),
         })
         self.assertNotEqual(first, second)
 
@@ -105,7 +111,9 @@ class GitInfoTest(unittest.TestCase):
                                  "deep/x.jsx": "1"},
                           "2026-03-01T10:00:00+05:30")
         _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
-        expected = {"commit": sha, "author": "Zoë Ünal", "date": "2026-03-01T04:30:00Z"}
+        expected = {"commit": sha, "author": "Zoë Ünal", "date": "2026-03-01T04:30:00Z",
+                    "subject": "change", "pr": ""}
+        expected = dict(expected, history=[dict(expected)])
         self.assertEqual(data["files"], {
             "A:My Scripts/Ordér hold.js": expected,
             "A:deep/er/nest/lib.js": expected,
@@ -117,11 +125,12 @@ class GitInfoTest(unittest.TestCase):
         self.commit(repo, {"Sub/b.js": "1"}, "2026-01-01T00:00:00+00:00",
                     author=f"Bo Chan <{EMAIL_TWO}>")
         _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
-        self.assertEqual(sorted(data), ["files", "generated_at", "version"])
+        self.assertEqual(sorted(data), ["files", "generated_at", "repos", "version"])
         self.assertEqual(data["version"], 1)
         self.assertRegex(data["generated_at"], DATE_RE)
-        self.assertEqual(data["files"]["A:ue.js"],
-                         {"commit": sha, "author": "Ann Lee", "date": "2027-01-01T05:30:15Z"})
+        expected = {"commit": sha, "author": "Ann Lee", "date": "2027-01-01T05:30:15Z",
+                    "subject": "change", "pr": ""}
+        self.assertEqual(data["files"]["A:ue.js"], dict(expected, history=[expected]))
         self.assertRegex(data["files"]["A:ue.js"]["commit"], r"^[0-9a-f]{40}$")
         text = self.out.read_text(encoding="utf-8")
         self.assertNotIn(EMAIL_ONE, text)
@@ -169,14 +178,131 @@ class GitInfoTest(unittest.TestCase):
 
         with mock.patch.object(script_map_gitinfo.subprocess, "run", spy):
             self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         argv, kwargs = calls[0]
         self.assertEqual(argv, ["git", "-C", str(repo), "-c", "core.quotepath=off", "log",
                                 "--no-renames", "-z", "--name-only",
-                                "--format=\x1e%H\x1f%an\x1f%cI"])
+                                "--format=\x1e%H\x1f%an\x1f%cI\x1f%s"])
         self.assertEqual(kwargs["timeout"], 120)
         self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
         self.assertNotIn("shell", kwargs)
+        remote_argv, remote_kwargs = calls[1]
+        self.assertEqual(remote_argv, ["git", "-C", str(repo), "config", "--get",
+                                       "remote.origin.url"])
+        self.assertEqual(remote_kwargs["timeout"], 120)
+        self.assertEqual(remote_kwargs["env"], kwargs["env"])
+        self.assertNotIn("shell", remote_kwargs)
+
+    # Commit subject, PR number, history and GitHub remote
+
+    def test_history_of_five_with_pr(self):
+        repo = self.make_repo()
+        shas = []
+        for day in range(1, 7):
+            message = "Fix deposit calc (#12)" if day == 6 else f"Step {day}"
+            shas.append(self.commit(repo, {"dep.js": str(day)},
+                                    f"2026-03-0{day}T10:00:00-07:00", message=message))
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        entry = data["files"]["A:dep.js"]
+        self.assertEqual(entry["commit"], shas[5])
+        self.assertEqual(entry["author"], "Ann Lee")
+        self.assertEqual(entry["date"], "2026-03-06T17:00:00Z")
+        self.assertEqual(entry["subject"], "Fix deposit calc (#12)")
+        self.assertEqual(entry["pr"], "12")
+        history = entry["history"]
+        self.assertEqual(len(history), 5)
+        self.assertEqual([item["commit"] for item in history], shas[5:0:-1])
+        self.assertEqual(history[0], {key: entry[key] for key in
+                                      ("commit", "author", "date", "subject", "pr")})
+        self.assertEqual(history[1], {"commit": shas[4], "author": "Ann Lee",
+                                      "date": "2026-03-05T17:00:00Z", "subject": "Step 5",
+                                      "pr": ""})
+        for item in history:
+            self.assertEqual(sorted(item), ["author", "commit", "date", "pr", "subject"])
+
+    def test_subject_without_trailing_pr(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00",
+                    message="Fix (#12) deposit calc")
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(data["files"]["A:a.js"]["subject"], "Fix (#12) deposit calc")
+        self.assertEqual(data["files"]["A:a.js"]["pr"], "")
+
+    def test_long_subject_cut_to_200(self):
+        repo = self.make_repo()
+        subject = "S" * 250
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00", message=subject)
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(data["files"]["A:a.js"]["subject"], "S" * 200)
+        self.assertEqual(data["files"]["A:a.js"]["history"][0]["subject"], "S" * 200)
+
+    def test_github_slug(self):
+        good = ["https://github.com/o/r", "https://github.com/o/r/",
+                "https://github.com/o/r.git", "git@github.com:o/r.git",
+                "ssh://git@github.com/o/r",
+                "https://x-access-token:SECRET123@github.com/o/r.git",
+                "https://GitHub.COM/o/r"]
+        for url in good:
+            with self.subTest(url=url):
+                self.assertEqual(script_map_gitinfo.github_slug(url), "o/r")
+        bad = ["https://gitlab.com/o/r", "http://github.com/o/r",
+               "https://github.com/o/r/extra", "https://github.com/../r",
+               "https://github.com/o/..", "https://github.com/o", "", None,
+               "https://evil.example/github.com/o/r", "git@github.com/o/r"]
+        for url in bad:
+            with self.subTest(url=url):
+                self.assertEqual(script_map_gitinfo.github_slug(url), "")
+        self.assertEqual(script_map_gitinfo.github_slug(
+            "https://github.com/mbsgcorp/Demo-Repo.git"), "mbsgcorp/Demo-Repo")
+
+    def test_token_remote_gives_slug_and_never_leaks(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        self.git(repo, "remote", "add", "origin",
+                 "https://x-access-token:SECRET123@github.com/mbsgcorp/Demo-Repo.git")
+        code, out, err = self.run_main(["--repo", f"L={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        text = self.out.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(text)["repos"], {"L": "mbsgcorp/Demo-Repo"})
+        for stream in (text, out, err):
+            self.assertNotIn("SECRET123", stream)
+            self.assertNotIn("x-access-token", stream)
+        self.assertEqual(err, "")
+        self.assertEqual(out, f"script_map_gitinfo: 1 files, 1 repos -> {self.out}\n")
+
+    def test_no_remote_warns_and_exits_zero(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        code, out, err = self.run_main(["--repo", f"L={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8"))["repos"], {"L": ""})
+        self.assertEqual(err, "warning: L has no GitHub remote; links omitted\n")
+        self.assertEqual(out, f"script_map_gitinfo: 1 files, 1 repos -> {self.out}\n")
+
+    def test_non_github_remote_warns(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        self.git(repo, "remote", "add", "origin", "https://tok:SECRET9@gitlab.com/o/r.git")
+        code, _, err = self.run_main(["--repo", f"L={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "warning: L has no GitHub remote; links omitted\n")
+        self.assertNotIn("SECRET9", self.out.read_text(encoding="utf-8"))
+
+    def test_remote_lookup_failure_is_not_an_error(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        real = subprocess.run
+
+        def remote_times_out(argv, **kwargs):
+            if "config" in argv:
+                raise subprocess.TimeoutExpired("git", 120)
+            return real(argv, **kwargs)
+
+        with mock.patch.object(script_map_gitinfo.subprocess, "run", remote_times_out):
+            code, _, err = self.run_main(["--repo", f"L={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "warning: L has no GitHub remote; links omitted\n")
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8"))["repos"], {"L": ""})
 
     # AC1 / AC2: arguments, branch and shallow guards
 
