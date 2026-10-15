@@ -344,6 +344,88 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
 .card .name { font-weight: 600; word-break: break-word; }
 .card .meta { color: var(--muted); font-size: 12px; }
 .card ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.mark {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-left: 6px;
+    color: var(--text);
+}
+.mark.mark-new { background: var(--low-bg); border-color: var(--low-border); }
+.mark.mark-updated { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+.mark.mark-removed { background: var(--high-bg); border-color: var(--high-border); }
+.updated-dot { color: var(--accent); margin-left: 6px; font-size: 12px; }
+#seen-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--badge-bg);
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    word-break: break-word;
+}
+#seen-banner button, #c-head .c-modes button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+#c-head .c-modes button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+#c-head .c-modes button:disabled { cursor: default; opacity: 0.6; }
+#c-head h2 { font-size: 15px; margin: 0; }
+#c-head .c-modes { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px; }
+.c-day h3 { font-size: 14px; margin: 12px 0 6px; }
+.c-change {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+.c-change a { color: var(--accent); }
+.c-files { list-style: none; margin: 4px 0 0; padding: 0; }
+.c-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; margin-top: 2px; word-break: break-word; }
+.c-file .mark { margin-left: 0; }
+.c-file .path { margin-left: 0; }
+.c-file .c-name { font-weight: 600; word-break: break-word; }
+.c-file button.c-name {
+    font: inherit;
+    font-weight: 600;
+    color: var(--accent);
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+}
+.c-detail { margin: 4px 0 6px; }
+.c-detail > details {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    padding: 6px 10px;
+}
+.c-detail summary { cursor: pointer; }
+.c-detail .name { font-weight: 600; word-break: break-word; }
+.c-detail .path { display: block; margin-left: 0; }
+.c-detail dl { margin: 6px 0 0; }
+.c-detail dt { font-weight: 600; margin-top: 6px; }
+.c-detail dd { margin: 2px 0 0; word-break: break-word; }
+.c-detail dd ul { margin: 0; padding-left: 18px; }
+.c-detail ul { list-style: disc; }
+.c-detail ol { list-style: decimal; }
 #skipped { margin: 16px; }
 #skipped table { border-collapse: collapse; width: 100%; margin-top: 8px; }
 #skipped th, #skipped td { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; word-break: break-all; }
@@ -370,6 +452,7 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         <button type="button" data-view="inventory">Inventory</button>
         <button type="button" data-view="records">Records</button>
         <button type="button" data-view="risk">Risk grid</button>
+        <button type="button" data-view="changes">Changes</button>
     </nav>
 </header>
 <main>
@@ -405,6 +488,10 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
     <section id="view-risk" class="view" hidden>
         <div id="r-tiles"></div>
         <div id="r-grid"></div>
+    </section>
+    <section id="view-changes" class="view" hidden>
+        <div id="c-head"></div>
+        <div id="c-list"></div>
     </section>
 </main>
 <details id="skipped"><summary id="skipped-summary"></summary><div id="skipped-body"></div></details>
@@ -545,6 +632,60 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
             // Storage is unavailable, so the name is not remembered for next time.
         }
     }
+    // Recent changes, newest first, and the "seen up to" date this browser stored for this
+    // environment. seenAt is read once and kept for the whole page session.
+    var changes = (Array.isArray(data.changes) ? data.changes : []).filter(function (c) {
+        return c && typeof c === 'object';
+    });
+    var SEEN_KEY = 'script-map-seen-' + (String(data.environment || '') || 'production');
+    var storageOk = false;
+    var seenAt = '';
+    var seenWritten = false;
+    function readSeen() {
+        try {
+            if (typeof window !== 'undefined' && window && window.localStorage) {
+                var stored = window.localStorage.getItem(SEEN_KEY);
+                storageOk = true;
+                return typeof stored === 'string' ? stored : '';
+            }
+        } catch (e) {
+            // Storage is unavailable, so nothing is tracked: no banner and no updated dots.
+            storageOk = false;
+        }
+        return '';
+    }
+    // Returns false when the write throws. Tracking is then off for the rest of the session:
+    // no updated dots, no unseen changes and the Changes view back in All mode.
+    function writeSeen() {
+        var newest = changes.length ? textOf(changes[0].date) : '';
+        if (!storageOk || !newest) { return true; }
+        try {
+            window.localStorage.setItem(SEEN_KEY, newest);
+            return true;
+        } catch (e) {
+            storageOk = false;
+            unseen = [];
+            changesMode = 'all';
+            return false;
+        }
+    }
+    var storedSeen = readSeen();
+    if (storageOk) {
+        if (storedSeen && !isNaN(Date.parse(storedSeen))) {
+            seenAt = storedSeen;
+        } else {
+            // First visit in this browser: nothing is unseen, tracking starts from now.
+            writeSeen();
+        }
+    }
+    function laterThanSeen(value) {
+        if (!storageOk || !seenAt || typeof value !== 'string') { return false; }
+        var t = Date.parse(value);
+        return !isNaN(t) && t > Date.parse(seenAt);
+    }
+    function isUnseen(change) { return laterThanSeen(change.date); }
+    var unseen = changes.filter(isUnseen);
+
     var themeButton = el('button');
     themeButton.type = 'button';
     themeButton.id = 'theme-toggle';
@@ -685,10 +826,12 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
             ' branch): ' + missingRepos.map(String).join(', ')));
     }
 
-    var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk' };
+    var views = { inventory: 'view-inventory', records: 'view-records', risk: 'view-risk',
+        changes: 'view-changes' };
     var navButtons = document.querySelectorAll('nav button');
     function showView(name) {
         currentView = name;
+        if (name === 'changes') { markSeen(); }
         Object.keys(views).forEach(function (k) {
             document.getElementById(views[k]).hidden = k !== name;
         });
@@ -1214,11 +1357,34 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         return box;
     }
 
+    var NEW_DAYS_MS = 14 * 86400000;
+    var UPDATED_LABEL = 'Updated since your last visit';
+
+    // Added within the last 14 days (and not more than a day in the future).
+    function isNewScript(s) {
+        var t = typeof s.added_at === 'string' ? Date.parse(s.added_at) : NaN;
+        if (isNaN(t)) { return false; }
+        var now = Date.now();
+        return now - t <= NEW_DAYS_MS && t - now <= 86400000;
+    }
+
+    // The NEW badge and the "updated since your last visit" dot, after a script's name.
+    function appendMarks(parent, s) {
+        if (isNewScript(s)) { parent.appendChild(el('span', 'mark mark-new', 'NEW')); }
+        if (laterThanSeen(s.last_commit_date)) {
+            var dot = el('span', 'updated-dot', '●');
+            dot.setAttribute('aria-label', UPDATED_LABEL);
+            dot.setAttribute('title', UPDATED_LABEL);
+            parent.appendChild(dot);
+        }
+    }
+
     function scriptEntry(s) {
         var details = el('details');
         details.setAttribute('data-id', s.id);
         var summary = el('summary');
         summary.appendChild(el('span', 'name', s.name));
+        appendMarks(summary, s);
         summary.appendChild(el('span', 'kind', ' · ' + s.repo + ' · '));
         var type = el('span', null, shortType(s.type));
         type.setAttribute('title', s.type);
@@ -1611,7 +1777,9 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
             card.tabIndex = 0;
             card.setAttribute('role', 'button');
             card.setAttribute('aria-expanded', 'false');
-            card.appendChild(el('div', 'name', s.name));
+            var cardName = el('div', 'name', s.name);
+            appendMarks(cardName, s);
+            card.appendChild(cardName);
             card.appendChild(el('div', 'meta', s.repo + ' · ' + s.type + ' · ' +
                 s.risk.level + ' (' + s.risk.score + ')'));
             var ul = el('ul');
@@ -1639,11 +1807,233 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         renderRepoChips();
     }
 
+    // Changes
+    var cHead = document.getElementById('c-head');
+    var cList = document.getElementById('c-list');
+    var changesMode = 'all';
+    var openChange = null;
+    var FILE_MARKS = {
+        added: ['mark-new', 'NEW'],
+        modified: ['mark-updated', 'UPDATED'],
+        removed: ['mark-removed', 'REMOVED']
+    };
+
+    // "Tue, Oct 13, 2026" for the Pacific date of an ISO string, the UTC "YYYY-MM-DD"
+    // without Intl, or '' when it does not parse.
+    function pacificDay(value) {
+        var d = new Date(typeof value === 'string' ? value : '');
+        if (isNaN(d.getTime())) { return ''; }
+        try {
+            return new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Los_Angeles', weekday: 'short', month: 'short',
+                day: 'numeric', year: 'numeric'
+            }).format(d);
+        } catch (e) {
+            return d.toISOString().slice(0, 10);
+        }
+    }
+
+    function changeFiles(change) {
+        return (Array.isArray(change.files) ? change.files : []).filter(function (f) {
+            return f && typeof f === 'object';
+        });
+    }
+
+    // The script node a changed file names, or null (removed, or not on this page).
+    function fileScript(f) {
+        var id = textOf(f.id);
+        if (!id || !Object.prototype.hasOwnProperty.call(byId, id)) { return null; }
+        return byId[id].kind === 'script' ? byId[id] : null;
+    }
+
+    // A file with a script uses every shared filter; any other file only matches the
+    // client and the search, and only while type, version and risk are unfiltered.
+    function fileShown(change, f) {
+        var s = fileScript(f);
+        if (s) { return matchesFilters(s); }
+        return inRepo({ repo: textOf(change.repo) }, state.repo) && state.type === ALL &&
+            state.version === ALL && state.risk === ALL && matchesSearch({ name: textOf(f.name) });
+    }
+
+    function closeChangeDetail() {
+        if (!openChange) { return; }
+        if (openChange.detail.parentNode) {
+            openChange.detail.parentNode.removeChild(openChange.detail);
+        }
+        openChange.button.setAttribute('aria-expanded', 'false');
+        openChange = null;
+    }
+
+    // Show the script's full details right under its file row; only one is open at a time.
+    function toggleChangeDetail(row, button, s) {
+        var wasOpen = openChange !== null && openChange.row === row;
+        closeChangeDetail();
+        if (wasOpen) { return; }
+        var wrap = el('li', 'c-detail');
+        var entry = scriptEntry(s);
+        entry.open = true;
+        wrap.appendChild(entry);
+        row.parentNode.insertBefore(wrap, row.nextSibling);
+        button.setAttribute('aria-expanded', 'true');
+        openChange = { row: row, button: button, detail: wrap };
+    }
+
+    function fileRow(f) {
+        var row = el('li', 'c-file');
+        var status = textOf(f.status);
+        var mark = Object.prototype.hasOwnProperty.call(FILE_MARKS, status) ?
+            FILE_MARKS[status] : FILE_MARKS.modified;
+        row.appendChild(el('span', 'mark ' + mark[0], mark[1]));
+        var s = fileScript(f);
+        if (s) {
+            var button = el('button', 'c-name', textOf(f.name));
+            button.type = 'button';
+            button.setAttribute('aria-expanded', 'false');
+            button.addEventListener('click', function () { toggleChangeDetail(row, button, s); });
+            row.appendChild(button);
+        } else {
+            row.appendChild(el('span', 'c-name', textOf(f.name)));
+        }
+        row.appendChild(el('span', 'path', textOf(f.path)));
+        return row;
+    }
+
+    function changeItem(change, files) {
+        var box = el('div', 'c-change');
+        var parts = [];
+        var stamp = changeStamp(change.date);
+        if (stamp) { parts.push(stamp); }
+        if (textOf(change.author)) { parts.push(change.author); }
+        if (textOf(change.repo)) { parts.push(change.repo); }
+        commitParts(parts, textOf(change.commit), change.commit_url, textOf(change.pr),
+            change.pr_url);
+        if (parts.length) { box.appendChild(joinedLine(parts)); }
+        if (textOf(change.subject)) { box.appendChild(el('div', 'kind', change.subject)); }
+        var list = el('ul', 'c-files');
+        files.forEach(function (f) { list.appendChild(fileRow(f)); });
+        box.appendChild(list);
+        return box;
+    }
+
+    function countText(n) { return n + ' change' + (n === 1 ? '' : 's'); }
+
+    function renderChangesHead(count) {
+        clear(cHead);
+        cHead.appendChild(el('h2', null, countText(count)));
+        var since = changeStamp(data.changes_since);
+        cHead.appendChild(el('div', 'kind', since ? 'Since ' + since : 'Last 30 days'));
+        var modes = el('div', 'c-modes');
+        [['all', 'All'], ['since', 'Since your last visit (' + unseen.length + ')']].forEach(
+            function (m) {
+                var button = el('button', null, m[1]);
+                button.type = 'button';
+                button.setAttribute('aria-pressed', changesMode === m[0] ? 'true' : 'false');
+                if (m[0] === 'since' && !unseen.length) { button.disabled = true; }
+                button.addEventListener('click', function () {
+                    changesMode = m[0];
+                    renderChanges();
+                });
+                modes.appendChild(button);
+            });
+        cHead.appendChild(modes);
+    }
+
+    function renderChanges() {
+        clear(cList);
+        openChange = null;
+        var sinceMode = changesMode === 'since';
+        var shown = [];
+        changes.forEach(function (c) {
+            if (sinceMode && !isUnseen(c)) { return; }
+            var files = changeFiles(c).filter(function (f) { return fileShown(c, f); });
+            if (files.length) { shown.push({ change: c, files: files }); }
+        });
+        renderChangesHead(shown.length);
+        if (!shown.length) {
+            cList.appendChild(el('p', 'empty', sinceMode ? 'No changes since your last visit.' :
+                'No changes in the last 30 days.'));
+            return;
+        }
+        var day = null;
+        var group = null;
+        shown.forEach(function (item) {
+            var label = pacificDay(item.change.date) || 'Unknown date';
+            if (group === null || label !== day) {
+                day = label;
+                group = el('div', 'c-day');
+                group.appendChild(el('h3', null, label));
+                cList.appendChild(group);
+            }
+            group.appendChild(changeItem(item.change, item.files));
+        });
+    }
+
+    // "Since your last visit" banner, above the shared filter bar. It counts every unseen
+    // change on the page, ignoring the filters.
+    var banner = null;
+
+    function authorText(list) {
+        var names = [];
+        list.forEach(function (c) {
+            var a = textOf(c.author);
+            if (a && names.indexOf(a) === -1) { names.push(a); }
+        });
+        if (names.length <= 1) { return names.join(''); }
+        if (names.length <= 3) {
+            return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+        }
+        return names.slice(0, 3).join(', ') + ' and ' + (names.length - 3) + ' more';
+    }
+
+    function hideBanner() {
+        if (banner && banner.parentNode) { banner.parentNode.removeChild(banner); }
+        banner = null;
+    }
+
+    function markSeen() {
+        var failed = false;
+        if (!seenWritten) {
+            seenWritten = true;
+            failed = !writeSeen();
+        }
+        hideBanner();
+        // The write failed: re-render so the dots and the Since count go away.
+        if (failed) { renderAll(); }
+    }
+
+    function showBanner() {
+        var controls = document.getElementById('i-controls');
+        if (!unseen.length || seenWritten || !controls.parentNode) { return; }
+        banner = el('div');
+        banner.id = 'seen-banner';
+        banner.setAttribute('role', 'status');
+        var authors = authorText(unseen);
+        banner.appendChild(el('span', null, countText(unseen.length) + ' since your last visit' +
+            (authors ? ' by ' + authors : '')));
+        var see = el('button', null, 'See changes');
+        see.type = 'button';
+        see.addEventListener('click', function () {
+            changesMode = 'since';
+            renderChanges();
+            showView('changes');
+        });
+        var dismiss = el('button', null, 'Dismiss');
+        dismiss.type = 'button';
+        dismiss.addEventListener('click', markSeen);
+        banner.appendChild(document.createTextNode(' · '));
+        banner.appendChild(see);
+        banner.appendChild(document.createTextNode(' · '));
+        banner.appendChild(dismiss);
+        controls.parentNode.insertBefore(banner, controls);
+    }
+    showBanner();
+
     function renderAll() {
         syncControls();
         renderInventory();
         renderRecords();
         renderRisk();
+        renderChanges();
     }
 
     // Re-render every view after a filter change and mirror the state in the URL hash.
