@@ -226,12 +226,10 @@ def parse_changes(label, text):
             changes.append(current)
             status = rest or None
             continue
-        if token.startswith("\n"):
-            token = token[1:]
         if current is None:
             continue
         if status is None:
-            status = token or None
+            status = (token[1:] if token.startswith("\n") else token) or None
             continue
         if token.endswith(".js"):
             current["files"].append({"path": token,
@@ -261,10 +259,11 @@ def main(argv=None):
         print("error: --branch must be a branch name", file=sys.stderr)
         return 2
     days = args.changes_days
-    if not (days.isascii() and days.isdigit() and 1 <= int(days) <= MAX_CHANGES_DAYS):
+    if not (days.isascii() and days.isdigit() and len(days.lstrip("0")) <= 3
+            and 1 <= int(days.lstrip("0") or "0") <= MAX_CHANGES_DAYS):
         print("error: --changes-days must be an integer from 1 to 365", file=sys.stderr)
         return 2
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).strftime(
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days.lstrip("0")))).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
 
     repos = []

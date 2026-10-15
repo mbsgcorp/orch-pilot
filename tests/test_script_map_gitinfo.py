@@ -572,6 +572,31 @@ class GitInfoTest(unittest.TestCase):
                                        "error: --changes-days must be an integer from 1 to 365\n")
                 run.assert_not_called()
 
+    def test_changes_days_huge_value(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for value in ("9" * 5000, "1" + "0" * 5000, "0" * 5000 + "366"):
+            with self.subTest(length=len(value)):
+                with mock.patch.object(script_map_gitinfo.subprocess, "run") as run:
+                    self.assert_failed(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--changes-days", value],
+                                       "error: --changes-days must be an integer from 1 to 365\n")
+                run.assert_not_called()
+
+    def test_changes_days_leading_zeros(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for value, days in (("030", 30), ("0" * 5000 + "1", 1)):
+            with self.subTest(length=len(value)):
+                if self.out.exists():
+                    self.out.unlink()
+                _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out),
+                                       "--changes-days", value])
+                since = datetime.strptime(data["changes_since"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                expected = datetime.now(timezone.utc) - timedelta(days=days)
+                self.assertLess(abs((since - expected).total_seconds()), 60)
+
     def test_changes_two_repos_interleave(self):
         a = self.make_repo("a")
         b = self.make_repo("b", author="Bo Chan", email=EMAIL_TWO)
@@ -653,6 +678,14 @@ class GitInfoTest(unittest.TestCase):
                                                  {"path": "y.js", "status": "modified"}]},
             {"repo": "L", "commit": "b" * 40, "author": "Bo", "date": "2026-03-02T17:00:00Z",
              "subject": "T", "pr": "", "files": [{"path": "n.js", "status": "added"}]},
+        ])
+
+    def test_parse_changes_keeps_newline_in_path(self):
+        text = ("\x1e" + "a" * 40 + "\x1fAnn\x1f2026-03-01T10:00:00-07:00\x1fS\nM\0\nweird.js\0"
+                "\nD\0gone.js\0")
+        self.assertEqual(script_map_gitinfo.parse_changes("L", text)[0]["files"], [
+            {"path": "\nweird.js", "status": "modified"},
+            {"path": "gone.js", "status": "removed"},
         ])
 
     def test_help_mentions_changes_days(self):
