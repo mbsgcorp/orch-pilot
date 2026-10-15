@@ -1261,7 +1261,7 @@ var u = 'CUSTOMRECORD99';
             "summary_author", "summary_guidance", "summary_history", "last_commit",
             "last_commit_author", "last_commit_date", "last_commit_subject", "last_commit_pr",
             "last_commit_url", "last_commit_pr_url", "last_commit_file_url",
-            "last_commit_raw_url", "commit_history"]))
+            "last_commit_raw_url", "commit_history", "added_at"]))
 
     # Summary trigger, author, guidance and history; --team
 
@@ -1449,7 +1449,7 @@ var u = 'CUSTOMRECORD99';
         self.assertEqual(sorted(data), sorted([
             "repos", "nodes", "edges", "skipped", "record_categories", "title", "refresh_url",
             "environment", "switch_url", "switch_label", "missing_repos", "branch", "team",
-            "generated_at", "link_origin"]))
+            "generated_at", "link_origin", "changes", "changes_since"]))
 
     def test_help_mentions_team(self):
         result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
@@ -1553,11 +1553,12 @@ var u = 'CUSTOMRECORD99';
 
     # Git last change: --git-info
 
-    def write_git_info(self, files, name="gitinfo.json", version=1, repos=None):
+    def write_git_info(self, files, name="gitinfo.json", version=1, repos=None, extra=None):
         path = self.root / name
         info = {"version": version, "generated_at": "2026-01-01T00:00:00Z", "files": files}
         if repos is not None:
             info["repos"] = repos
+        info.update(extra or {})
         path.write_text(json.dumps(info), encoding="utf-8")
         return path
 
@@ -2212,6 +2213,190 @@ console.log(JSON.stringify(out));
         self.assertIn("var linkOrigin = String(data.link_origin || '');", text)
         self.assertIn("Change history (", text)
         self.assertEqual(text.count("<script"), 2)
+
+    # Recent changes: "changes", "changes_since" and "added_at"
+
+    def change(self, repo, sha, date, files, subject="Edit", pr="", author="Kim"):
+        return {"repo": repo, "commit": sha, "author": author, "date": date,
+                "subject": subject, "pr": pr,
+                "files": [{"path": path, "status": status} for path, status in files]}
+
+    def test_changes_urls_ids_and_names(self):
+        repo = self.make_repo("a")
+        self.write("a/Sub/new.js", USER_EVENT)
+        self.write("a/old.js", USER_EVENT)
+        changes = [
+            self.change("A", self.SHA_A, "2026-03-03T00:00:00Z",
+                        [("Sub/new.js", "added"), ("gone.js", "removed")],
+                        subject="Add new (#12)", pr="12"),
+            self.change("A", self.SHA_B, "2026-03-02T00:00:00Z", [("old.js", "modified")]),
+        ]
+        data = script_map.collect([("A", repo)], git_repos={"A": "o/r"},
+                                  git_changes=script_map.normalize_changes(changes),
+                                  changes_since="2026-02-01T00:00:00Z")
+        base = "https://github.com/o/r/"
+        self.assertEqual(data["changes_since"], "2026-02-01T00:00:00Z")
+        self.assertEqual(data["changes"], [
+            {"repo": "A", "commit": self.SHA_A, "author": "Kim", "date": "2026-03-03T00:00:00Z",
+             "subject": "Add new (#12)", "pr": "12",
+             "commit_url": base + "commit/" + self.SHA_A, "pr_url": base + "pull/12",
+             "files": [
+                 {"path": "Sub/new.js", "status": "added", "id": "A:Sub/new.js",
+                  "name": "new.js"},
+                 {"path": "gone.js", "status": "removed", "id": "", "name": "gone.js"}]},
+            {"repo": "A", "commit": self.SHA_B, "author": "Kim", "date": "2026-03-02T00:00:00Z",
+             "subject": "Edit", "pr": "", "commit_url": base + "commit/" + self.SHA_B,
+             "pr_url": "",
+             "files": [{"path": "old.js", "status": "modified", "id": "A:old.js",
+                        "name": "old.js"}]},
+        ])
+
+    def test_changes_invalid_urls(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        good = self.change("A", self.SHA_A, "2026-03-03T00:00:00Z", [("ue.js", "added")],
+                           pr="12")
+        cases = [
+            ({"A": "o/r/x"}, good, ("", "")),
+            ({"A": 5}, good, ("", "")),
+            ({}, good, ("", "")),
+            ({"A": "o/r"}, dict(good, commit="abc123"), ("", "https://github.com/o/r/pull/12")),
+            ({"A": "o/r"}, dict(good, commit="javascript:alert(1)", pr="1x"), ("", "")),
+            ({"A": "o/r"}, dict(good, pr="(#12)"),
+             ("https://github.com/o/r/commit/" + self.SHA_A, "")),
+        ]
+        for slugs, change, expected in cases:
+            with self.subTest(slugs=slugs, change=change):
+                data = script_map.collect([("A", repo)], git_repos=slugs,
+                                          git_changes=script_map.normalize_changes([change]))
+                item = data["changes"][0]
+                self.assertEqual((item["commit_url"], item["pr_url"]), expected)
+
+    def test_changes_from_other_repos_dropped(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        changes = script_map.normalize_changes([
+            self.change("B", self.SHA_A, "2026-03-04T00:00:00Z", [("ue.js", "added")]),
+            self.change("A", self.SHA_B, "2026-03-03T00:00:00Z", [("ue.js", "modified")]),
+            self.change("", self.SHA_C, "2026-03-02T00:00:00Z", [("ue.js", "added")]),
+        ])
+        data = script_map.collect([("A", repo)], git_changes=changes)
+        self.assertEqual([c["commit"] for c in data["changes"]], [self.SHA_B])
+        self.assertEqual(self.scripts(data)["ue.js"]["added_at"], "")
+        data = script_map.collect([("B", repo)], git_changes=changes)
+        self.assertEqual([c["commit"] for c in data["changes"]], [self.SHA_A])
+        self.assertEqual(self.scripts(data)["ue.js"]["added_at"], "2026-03-04T00:00:00Z")
+
+    def test_added_at_newest_added_change(self):
+        repo = self.make_repo("a")
+        self.write("a/new.js", USER_EVENT)
+        self.write("a/old.js", USER_EVENT)
+        self.write("a/Sub/new.js", USER_EVENT)
+        changes = script_map.normalize_changes([
+            self.change("A", self.SHA_A, "2026-03-05T00:00:00Z", [("old.js", "modified")]),
+            self.change("A", self.SHA_B, "2026-03-04T00:00:00Z", [("new.js", "added")]),
+            self.change("A", self.SHA_C, "2026-03-02T00:00:00Z", [("new.js", "removed")]),
+            self.change("A", self.SHA_D, "2026-03-01T00:00:00Z", [("new.js", "added")]),
+        ])
+        nodes = self.scripts(script_map.collect([("A", repo)], git_changes=changes))
+        self.assertEqual(nodes["new.js"]["added_at"], "2026-03-04T00:00:00Z")
+        self.assertEqual(nodes["old.js"]["added_at"], "")
+        self.assertEqual(nodes["Sub/new.js"]["added_at"], "")
+
+    def test_changes_via_main(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        info = self.write_git_info({}, repos={"A": "o/r"}, extra={
+            "changes_since": "2026-02-01T00:00:00Z",
+            "changes": [self.change("A", self.SHA_A, "2026-03-03T00:00:00Z",
+                                    [("ue.js", "added"), ("x.js", "removed")], pr="3"),
+                        self.change("Z", self.SHA_B, "2026-03-02T00:00:00Z",
+                                    [("ue.js", "added")])]})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(info)])
+        self.assertEqual(code, 0, err)
+        data = self.read_data()[1]
+        self.assertEqual(data["changes_since"], "2026-02-01T00:00:00Z")
+        self.assertEqual(len(data["changes"]), 1)
+        self.assertEqual(data["changes"][0]["pr_url"], "https://github.com/o/r/pull/3")
+        self.assertEqual([(f["id"], f["name"]) for f in data["changes"][0]["files"]],
+                         [("A:ue.js", "ue.js"), ("", "x.js")])
+        self.assertEqual(self.scripts(data)["ue.js"]["added_at"], "2026-03-03T00:00:00Z")
+
+    def test_normalize_changes_malformed(self):
+        for value in (None, {}, "x", 5, {"changes": []}):
+            with self.subTest(value=value):
+                self.assertEqual(script_map.normalize_changes(value), [])
+        changes = script_map.normalize_changes([
+            "not an object", 7, None, ["list"],
+            {"repo": "A", "commit": 5, "author": None, "subject": ["x"], "pr": 12,
+             "files": "a.js"},
+            {"repo": "A", "date": "2026-03-01T00:00:00Z", "files": [
+                "a.js", None, {"path": 5, "status": "added"}, {"status": "added"},
+                {"path": "a.js", "status": "added"},
+                {"path": "b.js", "status": "renamed"},
+                {"path": "c.js"},
+                {"path": "d.js", "status": ["added"]},
+                {"path": "e.js", "status": "removed"},
+                {"path": "f.js", "status": "modified"}]},
+            {},
+        ])
+        empty = {"repo": "", "commit": "", "author": "", "date": "", "subject": "", "pr": "",
+                 "files": []}
+        self.assertEqual(changes, [
+            dict(empty, repo="A"),
+            dict(empty, repo="A", date="2026-03-01T00:00:00Z", files=[
+                {"path": "a.js", "status": "added"},
+                {"path": "b.js", "status": "modified"},
+                {"path": "c.js", "status": "modified"},
+                {"path": "d.js", "status": "modified"},
+                {"path": "e.js", "status": "removed"},
+                {"path": "f.js", "status": "modified"}]),
+            empty,
+        ])
+
+    def test_malformed_changes_via_main(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        for extra in ({"changes": {"A": []}, "changes_since": 5},
+                      {"changes": "x", "changes_since": None},
+                      {"changes": [None, "x", {"repo": "A", "files": {"ue.js": "added"}}]}):
+            with self.subTest(extra=extra):
+                info = self.write_git_info({}, extra=extra)
+                code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                              "--git-info", str(info)])
+                self.assertEqual(code, 0, err)
+                data = self.read_data()[1]
+                self.assertEqual(data["changes_since"], "")
+                expected = [] if "files" not in str(extra) else [
+                    {"repo": "A", "commit": "", "author": "", "date": "", "subject": "",
+                     "pr": "", "files": [], "commit_url": "", "pr_url": ""}]
+                self.assertEqual(data["changes"], expected)
+                self.assertEqual(self.scripts(data)["ue.js"]["added_at"], "")
+
+    def test_old_git_info_without_changes_loads(self):
+        repo = self.make_repo("a")
+        self.write("a/ue.js", USER_EVENT)
+        self.write("a/b.js", USER_EVENT)
+        history = self.three_commits()
+        info = self.write_git_info({"A:ue.js": dict(history[0], history=history)},
+                                   repos={"A": "o/r"})
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--git-info", str(info)])
+        self.assertEqual(code, 0, err)
+        data = self.read_data()[1]
+        self.assertEqual(data["changes"], [])
+        self.assertEqual(data["changes_since"], "")
+        nodes = self.scripts(data)
+        self.assertEqual([n["added_at"] for n in nodes.values()], ["", ""])
+        self.assertEqual(nodes["ue.js"]["last_commit_url"],
+                         "https://github.com/o/r/commit/" + self.SHA_A)
+        self.assertEqual(len(nodes["ue.js"]["commit_history"]), 2)
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        data = self.read_data()[1]
+        self.assertEqual((data["changes"], data["changes_since"]), ([], ""))
+        self.assertEqual(self.collect_one(repo)["changes"], [])
 
     # AC10 / AC16: template
 

@@ -75,6 +75,19 @@ The file's top-level "repos" object maps LABEL to a GitHub "OWNER/REPO" slug;
 "last_commit_raw_url" and the history URLs start with LINK_ORIGIN + slug and
 are "" unless the slug, the 40-hex commit and the PR number are valid. A file
 without "repos" or "history" loads with "" and [] for the new fields. Every page's data carries "link_origin" (LINK_ORIGIN).
+The file's "changes" list (else []) and "changes_since" string (else "") are
+read too: items that are not objects are dropped, missing or non-string
+"repo", "commit", "author", "date", "subject" and "pr" become "", "files" that
+is not a list becomes [], file items that are not objects or have a
+non-string "path" are dropped, and a "status" other than added, modified or
+removed becomes "modified". Each page's data carries "changes_since" and
+"changes": only the changes whose "repo" is a repo label on that page, each
+with "commit_url" and "pr_url" (built like the node URLs, "" when invalid),
+and each file as {"path", "status", "id", "name"}, where "id" is "LABEL:path"
+when a script node with that id is on the page (else "") and "name" is the
+path's last segment. Each script node gets "added_at": the "date" of the
+newest page change listing its path with status "added", else "". A file
+without "changes" or "changes_since" loads with [], "" and "added_at" "".
 """
 
 import argparse
@@ -203,6 +216,8 @@ COMMIT_RE = re.compile(r"[0-9a-fA-F]{40}")
 PR_RE = re.compile(r"[0-9]{1,9}")
 MAX_COMMITS = 5
 COMMIT_FIELDS = ("commit", "author", "date", "subject", "pr")
+CHANGE_FIELDS = ("repo",) + COMMIT_FIELDS
+CHANGE_STATUSES = ("added", "modified", "removed")
 
 
 def load_summary_cache(path):
@@ -301,6 +316,34 @@ def normalize_commit_history(value, slug, path, current=""):
     items = [item for item in value if isinstance(item, dict)
              and not (current and item.get("commit") == current)][:MAX_COMMITS]
     return [commit_item(item, slug, path) for item in items]
+
+
+def normalize_changes(value):
+    """Return a git info file's "changes" as a list of {repo, commit, author, date,
+    subject, pr, files: [{path, status}]}.
+
+    A value that is not a list gives []; items that are not objects are dropped and
+    missing or non-string fields become "". "files" that is not a list gives [];
+    file items that are not objects or whose "path" is not a string are dropped, and
+    a "status" outside CHANGE_STATUSES becomes "modified".
+    """
+    if not isinstance(value, list):
+        return []
+    changes = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        change = {field: item.get(field) if isinstance(item.get(field), str) else ""
+                  for field in CHANGE_FIELDS}
+        files = item.get("files") if isinstance(item.get("files"), list) else []
+        change["files"] = [
+            {"path": entry["path"],
+             "status": entry.get("status") if entry.get("status") in CHANGE_STATUSES
+             else "modified"}
+            for entry in files
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)]
+        changes.append(change)
+    return changes
 
 
 def header_description(text):
@@ -691,7 +734,7 @@ def js_files(root, errors=None):
 
 
 def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None,
-            git_repos=None):
+            git_repos=None, git_changes=None, changes_since=""):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
@@ -699,10 +742,13 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
     summary_namespace, when non-empty, prefixes each script's summary_key with "NAME|".
     git_info is the "files" dict of a git info file (see load_git_info) and
     git_repos its "repos" dict of LABEL -> GitHub "OWNER/REPO" slug.
+    git_changes is its "changes" list (see normalize_changes) and changes_since
+    its "changes_since" string.
     """
     summaries = summaries or {}
     git_info = git_info or {}
     git_repos = git_repos or {}
+    git_changes = git_changes or []
     key_prefix = f"{summary_namespace}|" if summary_namespace else ""
     by_sha = {}
     for key in sorted(summaries):
@@ -859,6 +905,7 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
                 "last_commit_raw_url": file_url(slug, last_commit, rel, "raw"),
                 "commit_history": normalize_commit_history(
                     last.get("history"), slug, rel, last_commit),
+                "added_at": "",
             })
 
         nodes.extend(script_nodes)
@@ -878,8 +925,32 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
             "script_count": len(script_nodes),
         })
 
+    page_labels = {label for label, _ in repos}
+    scripts_by_id = {node["id"]: node for node in nodes if node["kind"] == "script"}
+    changes = []
+    for change in git_changes:
+        label = change["repo"]
+        if label not in page_labels:
+            continue
+        slug = git_repos.get(label)
+        if not isinstance(slug, str):
+            slug = ""
+        files = []
+        for entry in change["files"]:
+            path = entry["path"]
+            node = scripts_by_id.get(f"{label}:{path}")
+            files.append({"path": path, "status": entry["status"],
+                          "id": node["id"] if node else "",
+                          "name": path.rsplit("/", 1)[-1]})
+            if node and entry["status"] == "added" and change["date"] > node["added_at"]:
+                node["added_at"] = change["date"]
+        changes.append(dict(change, files=files,
+                            commit_url=commit_url(slug, change["commit"]),
+                            pr_url=pr_url(slug, change["pr"])))
+
     return {"repos": repo_rows, "nodes": nodes, "edges": edges, "skipped": skipped,
-            "record_categories": list(RECORD_CATEGORIES)}
+            "record_categories": list(RECORD_CATEGORIES),
+            "changes_since": changes_since, "changes": changes}
 
 
 def render(data):
@@ -1008,11 +1079,16 @@ def main(argv=None):
 
     git_files = None
     git_repos = None
+    git_changes = []
+    changes_since = ""
     if args.git_info is not None:
         try:
             info = load_git_info(args.git_info)
             git_files = info["files"]
             git_repos = info.get("repos") if isinstance(info.get("repos"), dict) else {}
+            git_changes = normalize_changes(info.get("changes"))
+            if isinstance(info.get("changes_since"), str):
+                changes_since = info["changes_since"]
         except FileNotFoundError:
             print(f"error: {args.git_info} does not exist", file=sys.stderr)
             return 2
@@ -1022,7 +1098,8 @@ def main(argv=None):
 
     try:
         data = collect(repos, entries, args.branch, args.summary_namespace,
-                       git_info=git_files, git_repos=git_repos)
+                       git_info=git_files, git_repos=git_repos,
+                       git_changes=git_changes, changes_since=changes_since)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -125,7 +126,8 @@ class GitInfoTest(unittest.TestCase):
         self.commit(repo, {"Sub/b.js": "1"}, "2026-01-01T00:00:00+00:00",
                     author=f"Bo Chan <{EMAIL_TWO}>")
         _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
-        self.assertEqual(sorted(data), ["files", "generated_at", "repos", "version"])
+        self.assertEqual(sorted(data), ["changes", "changes_since", "files", "generated_at",
+                                        "repos", "version"])
         self.assertEqual(data["version"], 1)
         self.assertRegex(data["generated_at"], DATE_RE)
         expected = {"commit": sha, "author": "Ann Lee", "date": "2027-01-01T05:30:15Z",
@@ -178,7 +180,7 @@ class GitInfoTest(unittest.TestCase):
 
         with mock.patch.object(script_map_gitinfo.subprocess, "run", spy):
             self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         argv, kwargs = calls[0]
         self.assertEqual(argv, ["git", "-C", str(repo), "-c", "core.quotepath=off", "log",
                                 "--no-renames", "-z", "--name-only",
@@ -186,7 +188,13 @@ class GitInfoTest(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 120)
         self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
         self.assertNotIn("shell", kwargs)
-        remote_argv, remote_kwargs = calls[1]
+        changes_argv, changes_kwargs = calls[1]
+        self.assertEqual(changes_argv[:9], ["git", "-C", str(repo), "-c", "core.quotepath=off",
+                                            "log", "--no-renames", "-z", "--name-status"])
+        self.assertRegex(changes_argv[9], r"^--since=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(changes_argv[10:], ["--format=\x1e%H\x1f%an\x1f%cI\x1f%s"])
+        self.assertEqual(changes_kwargs, kwargs)
+        remote_argv, remote_kwargs = calls[2]
         self.assertEqual(remote_argv, ["git", "-C", str(repo), "config", "--get",
                                        "remote.origin.url"])
         self.assertEqual(remote_kwargs["timeout"], 120)
@@ -466,6 +474,225 @@ class GitInfoTest(unittest.TestCase):
         self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
         self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
         self.assertFalse(self.out.with_name(self.out.name + ".tmp").exists())
+
+    # Recent changes: --changes-days, "changes" and "changes_since"
+
+    def ago(self, days=0, minutes=0):
+        """Return now minus days and minutes as a git date and the expected UTC date."""
+        when = datetime.now(timezone.utc) - timedelta(days=days, minutes=minutes)
+        return when.strftime("%Y-%m-%dT%H:%M:%S+00:00"), when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def remove(self, repo, rel, date, message="remove"):
+        self.git(repo, "rm", "-q", rel)
+        env = dict(os.environ, GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        self.git(repo, "commit", "-q", "-m", message, env=env)
+        return self.git(repo, "rev-parse", "HEAD").strip()
+
+    def test_changes_added_modified_removed(self):
+        repo = self.make_repo()
+        old, _ = self.ago(days=60)
+        self.commit(repo, {"c.js": "1"}, old, message="old")
+        d1, u1 = self.ago(days=3)
+        d2, u2 = self.ago(days=2)
+        d3, u3 = self.ago(days=1)
+        add = self.commit(repo, {"a.js": "1"}, d1, message="Add a (#4)")
+        mod = self.commit(repo, {"a.js": "2", "b.txt": "x"}, d2, message="Edit a",
+                          author=f"Bo Chan <{EMAIL_TWO}>")
+        rem = self.remove(repo, "c.js", d3)
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(data["changes"], [
+            {"repo": "A", "commit": rem, "author": "Ann Lee", "date": u3, "subject": "remove",
+             "pr": "", "files": [{"path": "c.js", "status": "removed"}]},
+            {"repo": "A", "commit": mod, "author": "Bo Chan", "date": u2, "subject": "Edit a",
+             "pr": "", "files": [{"path": "a.js", "status": "modified"}]},
+            {"repo": "A", "commit": add, "author": "Ann Lee", "date": u1,
+             "subject": "Add a (#4)", "pr": "4", "files": [{"path": "a.js", "status": "added"}]},
+        ])
+        self.assertNotIn(EMAIL_TWO, self.out.read_text(encoding="utf-8"))
+
+    def test_changes_skip_non_js_empty_and_merge_commits(self):
+        repo = self.make_repo()
+        d1, _ = self.ago(days=5)
+        d2, _ = self.ago(days=4)
+        d3, _ = self.ago(days=3)
+        d4, u4 = self.ago(days=2)
+        d5, _ = self.ago(days=1)
+        self.commit(repo, {"notes.txt": "1"}, d1)
+        env = dict(os.environ, GIT_AUTHOR_DATE=d2, GIT_COMMITTER_DATE=d2)
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "empty", env=env)
+        self.git(repo, "checkout", "-q", "-b", "side")
+        side = self.commit(repo, {"x/b.js": "1", "y/c.js": "1", "d.json": "1"}, d3)
+        self.git(repo, "checkout", "-q", "main")
+        main_sha = self.commit(repo, {"a.js": "1"}, d4)
+        env = dict(os.environ, GIT_AUTHOR_DATE=d5, GIT_COMMITTER_DATE=d5)
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge", "side", env=env)
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual([c["commit"] for c in data["changes"]], [main_sha, side])
+        self.assertEqual(data["changes"][0]["date"], u4)
+        self.assertEqual(data["changes"][1]["files"], [
+            {"path": "x/b.js", "status": "added"}, {"path": "y/c.js", "status": "added"}])
+
+    def test_changes_days_window(self):
+        repo = self.make_repo()
+        d40, _ = self.ago(days=40)
+        d1, _ = self.ago(days=1)
+        old = self.commit(repo, {"a.js": "1"}, d40)
+        new = self.commit(repo, {"a.js": "2"}, d1)
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual([c["commit"] for c in data["changes"]], [new])
+        self.out.unlink()
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out),
+                               "--changes-days", "45"])
+        self.assertEqual([c["commit"] for c in data["changes"]], [new, old])
+        self.assertEqual(data["changes"][1]["files"], [{"path": "a.js", "status": "added"}])
+
+    def test_changes_since_is_cutoff(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for days in (None, "1", "45", "365"):
+            with self.subTest(days=days):
+                extra = ["--changes-days", days] if days else []
+                if self.out.exists():
+                    self.out.unlink()
+                _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)] + extra)
+                self.assertRegex(data["changes_since"], DATE_RE)
+                since = datetime.strptime(data["changes_since"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                expected = datetime.now(timezone.utc) - timedelta(days=int(days or 30))
+                self.assertLess(abs((since - expected).total_seconds()), 60)
+
+    def test_changes_days_invalid(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for value in ("0", "366", "abc", "-1", "", "1.5", "٣"):
+            with self.subTest(value=value):
+                with mock.patch.object(script_map_gitinfo.subprocess, "run") as run:
+                    self.assert_failed(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--changes-days", value],
+                                       "error: --changes-days must be an integer from 1 to 365\n")
+                run.assert_not_called()
+
+    def test_changes_days_huge_value(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for value in ("9" * 5000, "1" + "0" * 5000, "0" * 5000 + "366"):
+            with self.subTest(length=len(value)):
+                with mock.patch.object(script_map_gitinfo.subprocess, "run") as run:
+                    self.assert_failed(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--changes-days", value],
+                                       "error: --changes-days must be an integer from 1 to 365\n")
+                run.assert_not_called()
+
+    def test_changes_days_leading_zeros(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        for value, days in (("030", 30), ("0" * 5000 + "1", 1)):
+            with self.subTest(length=len(value)):
+                if self.out.exists():
+                    self.out.unlink()
+                _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out),
+                                       "--changes-days", value])
+                since = datetime.strptime(data["changes_since"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+                expected = datetime.now(timezone.utc) - timedelta(days=days)
+                self.assertLess(abs((since - expected).total_seconds()), 60)
+
+    def test_changes_two_repos_interleave(self):
+        a = self.make_repo("a")
+        b = self.make_repo("b", author="Bo Chan", email=EMAIL_TWO)
+        a1 = self.commit(a, {"a1.js": "1"}, self.ago(days=4)[0])
+        b1 = self.commit(b, {"b1.js": "1"}, self.ago(days=3)[0])
+        a2 = self.commit(a, {"a2.js": "1"}, self.ago(days=2)[0])
+        b2 = self.commit(b, {"b2.js": "1"}, self.ago(days=1)[0])
+        same, _ = self.ago(days=5)
+        a0 = self.commit(a, {"a0.js": "1"}, same)
+        b0 = self.commit(b, {"b0.js": "1"}, same)
+        _, data = self.run_ok(["--repo", f"B={b}", "--repo", f"A={a}", "--out", str(self.out)])
+        self.assertEqual([(c["repo"], c["commit"]) for c in data["changes"]],
+                         [("B", b2), ("A", a2), ("B", b1), ("A", a1), ("A", a0), ("B", b0)])
+        self.assertEqual(data["changes"][0]["author"], "Bo Chan")
+
+    def test_changes_capped_at_500_newest(self):
+        repo = self.make_repo()
+        (repo / "a.js").write_text("0", encoding="utf-8")
+        self.git(repo, "add", "-A")
+        for i in range(510):
+            (repo / "a.js").write_text(str(i), encoding="utf-8")
+            date, _ = self.ago(days=1, minutes=600 - i)
+            env = dict(os.environ, GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+            args = ["commit", "-q", "-m", f"c{i}"] + (["-a"] if i else [])
+            self.git(repo, *args, env=env)
+        newest = self.git(repo, "log", "--format=%H").split()
+        self.assertEqual(len(newest), 510)
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(len(data["changes"]), 500)
+        self.assertEqual([c["commit"] for c in data["changes"]], newest[:500])
+        self.assertEqual(data["changes"][-1]["subject"], "c10")
+
+    def test_changes_do_not_alter_files(self):
+        repo = self.make_repo()
+        d1, u1 = self.ago(days=2)
+        d2, u2 = self.ago(days=1)
+        first = self.commit(repo, {"a.js": "1", "c.js": "1"}, d1)
+        second = self.commit(repo, {"a.js": "2", "b.txt": "x"}, d2, message="Edit (#9)")
+        _, data = self.run_ok(["--repo", f"A={repo}", "--out", str(self.out)])
+        a_last = {"commit": second, "author": "Ann Lee", "date": u2,
+                  "subject": "Edit (#9)", "pr": "9"}
+        a_first = {"commit": first, "author": "Ann Lee", "date": u1,
+                   "subject": "change", "pr": ""}
+        self.assertEqual(data["files"], {
+            "A:a.js": dict(a_last, history=[a_last, a_first]),
+            "A:c.js": dict(a_first, history=[dict(a_first)]),
+        })
+        self.assertEqual(len(data["changes"]), 2)
+
+    def test_changes_git_failure_writes_nothing(self):
+        repo = self.make_repo()
+        self.commit(repo, {"a.js": "1"}, "2026-03-01T10:00:00-07:00")
+        real = subprocess.run
+
+        def changes_fail(argv, **kwargs):
+            if "--name-status" in argv:
+                return subprocess.CompletedProcess(argv, 128, "", "fatal: bad since\n")
+            return real(argv, **kwargs)
+
+        def changes_timeout(argv, **kwargs):
+            if "--name-status" in argv:
+                raise subprocess.TimeoutExpired("git", 120)
+            return real(argv, **kwargs)
+
+        for fake, message in ((changes_fail, "error: A git log failed: fatal: bad since\n"),
+                              (changes_timeout, "error: A git log failed: timed out\n")):
+            with self.subTest(message=message):
+                with mock.patch.object(script_map_gitinfo.subprocess, "run", fake):
+                    self.assert_failed(["--repo", f"A={repo}", "--out", str(self.out)],
+                                       message)
+
+    def test_parse_changes_status_in_header_token(self):
+        text = ("\x1e" + "a" * 40 + "\x1fAnn\x1f2026-03-01T10:00:00-07:00\x1fS\nM\0x.js\0"
+                "T\0y.js\0\nD\0z.txt\0\x1e" + "b" * 40
+                + "\x1fBo\x1f2026-03-02T10:00:00-07:00\x1fT\0\nA\0n.js\0")
+        self.assertEqual(script_map_gitinfo.parse_changes("L", text), [
+            {"repo": "L", "commit": "a" * 40, "author": "Ann", "date": "2026-03-01T17:00:00Z",
+             "subject": "S", "pr": "", "files": [{"path": "x.js", "status": "modified"},
+                                                 {"path": "y.js", "status": "modified"}]},
+            {"repo": "L", "commit": "b" * 40, "author": "Bo", "date": "2026-03-02T17:00:00Z",
+             "subject": "T", "pr": "", "files": [{"path": "n.js", "status": "added"}]},
+        ])
+
+    def test_parse_changes_keeps_newline_in_path(self):
+        text = ("\x1e" + "a" * 40 + "\x1fAnn\x1f2026-03-01T10:00:00-07:00\x1fS\nM\0\nweird.js\0"
+                "\nD\0gone.js\0")
+        self.assertEqual(script_map_gitinfo.parse_changes("L", text)[0]["files"], [
+            {"path": "\nweird.js", "status": "modified"},
+            {"path": "gone.js", "status": "removed"},
+        ])
+
+    def test_help_mentions_changes_days(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--changes-days", result.stdout)
 
 
 if __name__ == "__main__":
