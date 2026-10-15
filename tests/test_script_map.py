@@ -169,7 +169,7 @@ function gridState() {
     });
 }
 function views() {
-    return ['view-inventory', 'view-records', 'view-risk'].filter(function (id) {
+    return ['view-inventory', 'view-records', 'view-risk', 'view-changes'].filter(function (id) {
         return !byIdMap[id].hidden;
     });
 }
@@ -190,6 +190,102 @@ var window = {
         (HASH_LISTENERS[type] = HASH_LISTENERS[type] || []).push(fn);
     }
 };
+"""
+
+# Helpers for the Changes view tests (run after FILTER_PRELUDE).
+CHANGES_HELPERS = r"""
+var MAIN = new Elem('main');
+MAIN.appendChild(document.getElementById('i-controls'));
+if (typeof SETS === 'undefined') { var SETS = []; }
+function isElem(c) { return c instanceof Elem; }
+function linkOf(c) {
+    return { tag: c.tagName, text: c.textContent, href: c.getAttribute('href'),
+             target: c.getAttribute('target'), rel: c.getAttribute('rel') };
+}
+function changeBoxes() {
+    return walk(byIdMap['c-list'], function (c) { return c.className === 'c-change'; });
+}
+function fileState(li) {
+    if (li.className === 'c-detail') {
+        var d = li.children[0];
+        return ['c-detail', d.tagName, !!d.open, entryName(d)];
+    }
+    return [li.children[0].className, li.children[0].textContent, li.children[1].tagName,
+            li.children[1].textContent, li.children[2].textContent];
+}
+function changeState(box) {
+    var line = box.children[0];
+    return {
+        line: line.textContent,
+        links: line.children.filter(isElem).map(linkOf),
+        subject: box.children.filter(function (c) { return c.className === 'kind'; })
+            .map(function (c) { return c.textContent; }),
+        files: box.children.filter(function (c) { return c.className === 'c-files'; })[0]
+            .children.map(fileState)
+    };
+}
+function changesState() {
+    var head = byIdMap['c-head'];
+    var list = byIdMap['c-list'];
+    return {
+        count: head.children[0].textContent,
+        since: head.children[1].textContent,
+        buttons: head.children[2].children,
+        modes: head.children[2].children.map(function (b) {
+            return [b.textContent, b.getAttribute('aria-pressed'), !!b.disabled];
+        }),
+        empty: list.children.filter(function (c) { return c.className === 'empty'; })
+            .map(function (c) { return c.textContent; }),
+        days: list.children.filter(function (c) { return c.className === 'c-day'; })
+            .map(function (d) {
+                return { day: d.children[0].textContent,
+                         changes: d.children.slice(1).map(changeState) };
+            })
+    };
+}
+function fileButton(name) {
+    return walk(byIdMap['c-list'], function (c) {
+        return c.tagName === 'button' && c.textContent === name;
+    })[0];
+}
+function bannerEl() {
+    return MAIN.children.filter(function (c) { return c.id === 'seen-banner'; })[0] || null;
+}
+function bannerState() {
+    var b = bannerEl();
+    if (!b) { return null; }
+    return {
+        role: b.getAttribute('role'),
+        text: b.textContent,
+        before_controls: MAIN.children.indexOf(b) + 1 === MAIN.children.indexOf(byIdMap['i-controls']),
+        buttons: b.children.filter(function (c) { return c.tagName === 'button'; })
+            .map(function (c) { return [c.type, c.textContent]; })
+    };
+}
+function bannerButton(text) {
+    return bannerEl().children.filter(function (c) { return c.textContent === text; })[0];
+}
+function markList(parent) {
+    return parent.children.filter(function (c) {
+        return c.className === 'updated-dot' || c.className.indexOf('mark') === 0;
+    }).map(function (c) {
+        return [c.className, c.textContent, c.getAttribute('aria-label'), c.getAttribute('title')];
+    });
+}
+function entryMarks() {
+    var out = {};
+    scriptEntries('i-list').forEach(function (d) {
+        out[entryName(d)] = markList(d.children[0]);
+    });
+    return out;
+}
+function cardMarks() {
+    var out = {};
+    byIdMap['r-grid'].children.forEach(function (c) {
+        if (c.className.indexOf('card') === 0) { out[c.children[0].text] = markList(c.children[0]); }
+    });
+    return out;
+}
 """
 
 
@@ -3995,6 +4091,443 @@ afterTicks(function () {
                     "http://", "https://", "querySelector('#script-search"):
             self.assertNotIn(bad, text)
 
+    # Changes view, "since your last visit" banner, NEW badge and updated dot
+
+    C1_DATE = "2026-10-14T18:00:00Z"
+    C2_DATE = "2026-10-14T06:30:00Z"
+    C3_DATE = "2026-10-13T15:00:00Z"
+    NOW = "2026-10-15T12:00:00Z"
+
+    def changes_payload(self):
+        base = "https://github.com/o/r/"
+        def change(repo, sha, date, author, subject, pr, files):
+            return {"repo": repo, "commit": sha, "author": author, "date": date,
+                    "subject": subject, "pr": pr, "commit_url": base + "commit/" + sha,
+                    "pr_url": base + "pull/" + pr if pr else "",
+                    "files": [{"path": p, "status": st, "id": i, "name": p.split("/")[-1]}
+                              for p, st, i in files]}
+        return [
+            change("RTMH", self.SHA_A, self.C1_DATE, "Ana", "Fix deposit (#12)", "12",
+                   [("Req.Dep.js", "modified", "RTMH:Req.Dep.js"),
+                    ("old/gone.js", "removed", "")]),
+            change("WCS", self.SHA_B, self.C2_DATE, "Bo", "", "",
+                   [("hold.js", "added", "WCS:hold.js")]),
+            change("RTMH", self.SHA_C, self.C3_DATE, "Cy", "Tidy", "",
+                   [("req_other.js", "modified", "RTMH:req_other.js")]),
+        ]
+
+    def run_changes_in_node(self, tail, store=None, throwing=False, hash_=None, edit="",
+                            extra=""):
+        """Run the page on SEARCH_REPOS with the changes fixture and Date.now at NOW.
+        `store` is the initial localStorage content (None: no localStorage), `throwing`
+        makes localStorage throw, `edit` is JS run on the page data `d`, `extra` is JS
+        run before FILTER_PRELUDE."""
+        prelude = ""
+        if hash_ is not None:
+            prelude += HASH_PRELUDE % json.dumps(hash_)
+        elif store is not None or throwing:
+            prelude += "var window = {};\n"
+        if throwing:
+            prelude += """
+window.localStorage = {
+    getItem: function () { throw new Error('denied'); },
+    setItem: function () { throw new Error('denied'); }
+};
+"""
+        elif store is not None:
+            prelude += """
+var STORE = %s;
+var SETS = [];
+window.localStorage = {
+    getItem: function (k) { return k in STORE ? STORE[k] : null; },
+    setItem: function (k, v) { SETS.push([k, String(v)]); STORE[k] = String(v); }
+};
+""" % json.dumps(store)
+        prelude += extra + FILTER_PRELUDE + CHANGES_HELPERS + """
+var NOW_MS = Date.parse(%s);
+Date.now = function () { return NOW_MS; };
+editData(function (d) {
+    d.changes = %s;
+    d.changes_since = '2026-09-15T12:00:00Z';
+    var dates = { 'Req.Dep.js': %s, 'hold.js': %s, 'req_other.js': %s };
+    d.nodes.forEach(function (n) {
+        if (n.kind === 'script') { n.last_commit_date = dates[n.name]; }
+    });
+    %s
+});
+""" % (json.dumps(self.NOW), json.dumps(self.changes_payload()), json.dumps(self.C1_DATE),
+       json.dumps(self.C2_DATE), json.dumps(self.C3_DATE), edit)
+        return self.run_header_in_node([], tail, prelude, SEARCH_REPOS)
+
+    def test_template_changes_markup_and_css(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        nav = text[text.index("<nav>"):text.index("</nav>")]
+        self.assertEqual(re.findall(r'data-view="([^"]+)">([^<]+)<', nav), [
+            ("inventory", "Inventory"), ("records", "Records"), ("risk", "Risk grid"),
+            ("changes", "Changes")])
+        self.assertLess(text.index('<section id="view-risk"'),
+                        text.index('<section id="view-changes" class="view" hidden>'))
+        self.assertLess(text.index('<section id="view-changes"'), text.index("</main>"))
+        for label in ("Since your last visit", "script-map-seen-",
+                      "No changes in the last 30 days.", "No changes since your last visit.",
+                      "Last 30 days", "See changes", "Dismiss", "Updated since your last visit",
+                      "America/Los_Angeles"):
+            self.assertIn(label, text)
+        self.assertEqual(self.css_rule(text, ".mark.mark-new"), {
+            "background": "var(--low-bg)", "border-color": "var(--low-border)"})
+        self.assertEqual(self.css_rule(text, ".mark.mark-updated"), {
+            "background": "var(--accent)", "border-color": "var(--accent)",
+            "color": "var(--accent-contrast)"})
+        self.assertEqual(self.css_rule(text, ".mark.mark-removed"), {
+            "background": "var(--high-bg)", "border-color": "var(--high-border)"})
+        self.assertEqual(self.css_rule(text, ".updated-dot")["color"], "var(--accent)")
+        self.assertEqual(self.css_rule(text, ".mark")["color"], "var(--text)")
+        self.assertEqual(self.css_rule(text, ".c-file")["flex-wrap"], "wrap")
+        self.assertEqual(self.css_rule(text, ".c-file")["word-break"], "break-word")
+        self.assertEqual(self.css_rule(text, ".c-change")["word-break"], "break-word")
+        for selector in (".mark", ".mark.mark-new", ".mark.mark-updated", ".mark.mark-removed",
+                         ".updated-dot", "#seen-banner", ".c-change", ".c-file"):
+            for value in self.css_rule(text, selector).values():
+                self.assertNotRegex(value, r"#[0-9a-fA-F]{3,6}\b")
+
+    def test_changes_nav_and_hash_open_view(self):
+        tail = """
+var out = { start: views() };
+navTo('changes');
+out.nav = views();
+out.hash = HASH_WRITES[HASH_WRITES.length - 1];
+navTo('risk');
+out.back = views();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail, hash_="")
+        self.assertEqual(out["start"], ["view-inventory"])
+        self.assertEqual(out["nav"], ["view-changes"])
+        self.assertEqual(out["hash"], "#view=changes")
+        self.assertEqual(out["back"], ["view-risk"])
+        tail = """
+console.log(JSON.stringify({ shown: views(), filters: filters(), count: changesState().count,
+                             stored: STORE }));
+"""
+        out = self.run_changes_in_node(
+            tail, hash_="#view=changes&client=WCS",
+            extra="var STORE = { 'script-map-seen-Production': '2026-10-01T00:00:00Z' };\n"
+                  "window.localStorage = { getItem: function (k) { return STORE[k] || null; },"
+                  " setItem: function (k, v) { STORE[k] = v; } };\n")
+        self.assertEqual(out["shown"], ["view-changes"])
+        self.assertEqual(out["filters"]["repo"], "WCS")
+        self.assertEqual(out["count"], "1 change")
+        # Opening the view from the hash marks the newest change as seen.
+        self.assertEqual(out["stored"], {"script-map-seen-Production": self.C1_DATE})
+
+    def test_changes_view_lines_days_links_and_badges(self):
+        tail = """
+navTo('changes');
+var s = changesState();
+delete s.buttons;
+console.log(JSON.stringify(s));
+"""
+        out = self.run_changes_in_node(tail)
+        self.assertEqual(out["count"], "3 changes")
+        self.assertEqual(out["since"], "Since 2026-09-15 5:00 AM PDT")
+        self.assertEqual(out["modes"], [["All", "true", False],
+                                        ["Since your last visit (0)", "false", True]])
+        self.assertEqual(out["empty"], [])
+        # 2026-10-14T06:30Z is still Oct 13 in Pacific time.
+        self.assertEqual([d["day"] for d in out["days"]],
+                         ["Wed, Oct 14, 2026", "Tue, Oct 13, 2026"])
+        self.assertEqual([len(d["changes"]) for d in out["days"]], [1, 2])
+        c1, c2, c3 = out["days"][0]["changes"] + out["days"][1]["changes"]
+        base = "https://github.com/o/r/"
+        self.assertEqual(c1["line"], "2026-10-14 11:00 AM PDT · Ana · RTMH · 0123456 · PR #12")
+        self.assertEqual(c1["links"], [
+            self.link("0123456", base + "commit/" + self.SHA_A),
+            self.link("PR #12", base + "pull/12")])
+        self.assertEqual(c1["subject"], ["Fix deposit (#12)"])
+        self.assertEqual(c1["files"], [
+            ["mark mark-updated", "UPDATED", "button", "Req.Dep.js", "Req.Dep.js"],
+            ["mark mark-removed", "REMOVED", "span", "gone.js", "old/gone.js"]])
+        self.assertEqual(c2["line"], "2026-10-13 11:30 PM PDT · Bo · WCS · 89abcde")
+        self.assertEqual(c2["links"], [self.link("89abcde", base + "commit/" + self.SHA_B)])
+        self.assertEqual(c2["subject"], [])
+        self.assertEqual(c2["files"], [["mark mark-new", "NEW", "button", "hold.js", "hold.js"]])
+        self.assertEqual(c3["line"], "2026-10-13 8:00 AM PDT · Cy · RTMH · fedcba9")
+        self.assertEqual(c3["subject"], ["Tidy"])
+
+    def test_changes_view_text_fallbacks(self):
+        tail = """
+navTo('changes');
+var s = changesState();
+delete s.buttons;
+console.log(JSON.stringify(s));
+"""
+        out = self.run_changes_in_node(
+            tail, edit="d.changes_since = ''; d.link_origin = '';",
+            extra="Intl.DateTimeFormat = function () { throw new Error('no Intl'); };\n")
+        self.assertEqual(out["since"], "Last 30 days")
+        # Without Intl the day headings are UTC dates.
+        self.assertEqual([d["day"] for d in out["days"]], ["2026-10-14", "2026-10-13"])
+        c1 = out["days"][0]["changes"][0]
+        self.assertEqual([l["tag"] for l in c1["links"]], ["span", "span"])
+
+    def test_changes_inline_details(self):
+        tail = """
+navTo('changes');
+var out = {};
+var req = fileButton('Req.Dep.js');
+click(req);
+out.open = changesState().days[0].changes[0].files;
+out.expanded = req.getAttribute('aria-expanded');
+click(fileButton('hold.js'));
+out.moved = changesState().days.map(function (d) {
+    return d.changes.map(function (c) { return c.files; });
+});
+out.req_expanded = req.getAttribute('aria-expanded');
+click(fileButton('hold.js'));
+out.closed = changesState().days[1].changes[0].files;
+click(fileButton('Req.Dep.js'));
+change('i-risk', 'low');
+change('i-risk', '');
+out.rerendered = changesState().days[0].changes[0].files;
+out.shown = views();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail)
+        row_req = ["mark mark-updated", "UPDATED", "button", "Req.Dep.js", "Req.Dep.js"]
+        row_gone = ["mark mark-removed", "REMOVED", "span", "gone.js", "old/gone.js"]
+        row_hold = ["mark mark-new", "NEW", "button", "hold.js", "hold.js"]
+        self.assertEqual(out["open"], [row_req, ["c-detail", "details", True, "Req.Dep.js"],
+                                       row_gone])
+        self.assertEqual(out["expanded"], "true")
+        # Only one detail is open at a time.
+        self.assertEqual(out["moved"][0], [[row_req, row_gone]])
+        self.assertEqual(out["moved"][1][0],
+                         [row_hold, ["c-detail", "details", True, "hold.js"]])
+        self.assertEqual(out["req_expanded"], "false")
+        self.assertEqual(out["closed"], [row_hold])
+        # A filter change re-renders the view and closes the detail.
+        self.assertEqual(out["rerendered"], [row_req, row_gone])
+        self.assertEqual(out["shown"], ["view-changes"])
+
+    def test_changes_filters(self):
+        tail = """
+navTo('changes');
+function names() {
+    var s = changesState();
+    return { count: s.count, empty: s.empty, files: [].concat.apply([], s.days.map(function (d) {
+        return d.changes.map(function (c) { return c.files.map(function (f) { return f[3]; }); });
+    })) };
+}
+var out = { all: names() };
+click(chipByRepo('WCS'));
+out.wcs = names();
+click(chipByRepo('RTMH'));
+out.rtmh = names();
+click(byIdMap['i-clear']);
+change('i-type', 'UserEventScript');
+out.ue = names();
+click(byIdMap['i-clear']);
+typeSearch('GONE');
+out.gone = names();
+typeSearch('req');
+out.req = names();
+click(chipByRepo('WCS'));
+typeSearch('gone');
+out.wcs_gone = names();
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail)
+        self.assertEqual(out["all"]["files"], [["Req.Dep.js", "gone.js"], ["hold.js"],
+                                               ["req_other.js"]])
+        self.assertEqual(out["wcs"], {"count": "1 change", "empty": [], "files": [["hold.js"]]})
+        self.assertEqual(out["rtmh"]["files"], [["Req.Dep.js", "gone.js"], ["req_other.js"]])
+        # A type filter hides removed files and changes with no matching file.
+        self.assertEqual(out["ue"]["files"], [["Req.Dep.js"], ["hold.js"]])
+        self.assertEqual(out["ue"]["count"], "2 changes")
+        # Removed files match the search by name, like scripts.
+        self.assertEqual(out["gone"]["files"], [["gone.js"]])
+        self.assertEqual(out["req"]["files"], [["Req.Dep.js"], ["req_other.js"]])
+        self.assertEqual(out["wcs_gone"], {"count": "0 changes",
+                                           "empty": ["No changes in the last 30 days."],
+                                           "files": []})
+
+    def test_changes_empty_states(self):
+        tail = """
+navTo('changes');
+var s = changesState();
+delete s.buttons;
+console.log(JSON.stringify(s));
+"""
+        out = self.run_changes_in_node(tail, edit="d.changes = [];")
+        self.assertEqual(out["count"], "0 changes")
+        self.assertEqual(out["empty"], ["No changes in the last 30 days."])
+        self.assertEqual(out["days"], [])
+        tail = """
+click(bannerButton('See changes'));
+typeSearch('zzz');
+var s = changesState();
+delete s.buttons;
+console.log(JSON.stringify(s));
+"""
+        out = self.run_changes_in_node(tail, store={
+            "script-map-seen-Production": "2026-10-13T20:00:00Z"})
+        self.assertEqual(out["modes"][1][:2], ["Since your last visit (2)", "true"])
+        self.assertEqual(out["empty"], ["No changes since your last visit."])
+
+    def test_seen_first_visit(self):
+        tail = """
+console.log(JSON.stringify({ banner: bannerState(), sets: SETS, marks: entryMarks(),
+                             modes: changesState().modes }));
+"""
+        out = self.run_changes_in_node(tail, store={})
+        self.assertIsNone(out["banner"])
+        self.assertEqual(out["sets"], [["script-map-seen-Production", self.C1_DATE]])
+        self.assertEqual(out["modes"][1], ["Since your last visit (0)", "false", True])
+        self.assertEqual(out["marks"], {"Req.Dep.js": [], "hold.js": [], "req_other.js": []})
+
+    def test_seen_banner_counts_and_see_changes(self):
+        tail = """
+var out = { banner: bannerState(), sets_at_load: SETS.slice(), marks: entryMarks(),
+            risk_marks: cardMarks(), modes: changesState().modes };
+click(bannerButton('See changes'));
+out.after = { banner: bannerState(), shown: views(), count: changesState().count,
+              modes: changesState().modes, sets: SETS, marks: entryMarks() };
+click(changesState().buttons[0]);
+out.all = changesState().count;
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail, store={
+            "script-map-seen-Production": "2026-10-13T20:00:00Z"})
+        self.assertEqual(out["banner"], {
+            "role": "status", "before_controls": True,
+            "text": "2 changes since your last visit by Ana and Bo · See changes · Dismiss",
+            "buttons": [["button", "See changes"], ["button", "Dismiss"]]})
+        self.assertEqual(out["sets_at_load"], [])
+        self.assertEqual(out["modes"][1], ["Since your last visit (2)", "false", False])
+        dot = ["updated-dot", "●", "Updated since your last visit",
+               "Updated since your last visit"]
+        self.assertEqual(out["marks"], {"Req.Dep.js": [dot], "hold.js": [dot],
+                                        "req_other.js": []})
+        self.assertEqual(out["risk_marks"], out["marks"])
+        after = out["after"]
+        self.assertIsNone(after["banner"])
+        self.assertEqual(after["shown"], ["view-changes"])
+        self.assertEqual(after["count"], "2 changes")
+        self.assertEqual(after["modes"], [["All", "false", False],
+                                          ["Since your last visit (2)", "true", False]])
+        self.assertEqual(after["sets"], [["script-map-seen-Production", self.C1_DATE]])
+        # seenAt is kept for the session: the dots stay until reload.
+        self.assertEqual(after["marks"], out["marks"])
+        self.assertEqual(out["all"], "3 changes")
+
+    def test_seen_banner_dismiss(self):
+        tail = """
+var out = { before: !!bannerState() };
+click(bannerButton('Dismiss'));
+out.banner = bannerState();
+out.shown = views();
+out.sets = SETS.slice();
+navTo('changes');
+out.modes = changesState().modes;
+out.sets_after_view = SETS.length;
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail, store={
+            "script-map-seen-Production": "2026-10-13T20:00:00Z"})
+        self.assertTrue(out["before"])
+        self.assertIsNone(out["banner"])
+        self.assertEqual(out["shown"], ["view-inventory"])
+        self.assertEqual(out["sets"], [["script-map-seen-Production", self.C1_DATE]])
+        self.assertEqual(out["modes"][1], ["Since your last visit (2)", "false", False])
+        self.assertEqual(out["sets_after_view"], 1)
+
+    def test_seen_banner_author_list(self):
+        tail = "console.log(JSON.stringify(bannerState().text));"
+        seen = {"script-map-seen-Production": "2026-10-13T20:00:00Z"}
+        many = """
+var base = d.changes[0];
+d.changes = ['A', 'B', 'A', '', 'C', 'D'].map(function (a, i) {
+    return Object.assign({}, base, { author: a, date: '2026-10-14T1' + (9 - i) + ':00:00Z' });
+});
+"""
+        out = self.run_changes_in_node(tail, edit=many, store=seen)
+        self.assertEqual(out, "6 changes since your last visit by A, B, C and 1 more "
+                              "· See changes · Dismiss")
+        out = self.run_changes_in_node(
+            tail, edit="d.changes.forEach(function (c) { c.author = ''; });", store=seen)
+        self.assertEqual(out, "2 changes since your last visit · See changes · Dismiss")
+        out = self.run_changes_in_node(
+            tail, store={"script-map-seen-Production": "2026-10-14T10:00:00Z"})
+        self.assertEqual(out, "1 change since your last visit by Ana · See changes · Dismiss")
+        # The banner ignores the filters.
+        out = self.run_changes_in_node(
+            "click(chipByRepo('WCS')); typeSearch('zzz');" + tail, store=seen)
+        self.assertEqual(out, "2 changes since your last visit by Ana and Bo "
+                              "· See changes · Dismiss")
+
+    def test_seen_key_per_environment(self):
+        tail = "console.log(JSON.stringify({ banner: !!bannerState(), sets: SETS }));"
+        store = {"script-map-seen-Production": "2026-10-13T20:00:00Z"}
+        out = self.run_changes_in_node(tail, store=store, edit="d.environment = 'Sandbox';")
+        # Sandbox has its own key: a first visit there, despite the Production value.
+        self.assertEqual(out, {"banner": False,
+                               "sets": [["script-map-seen-Sandbox", self.C1_DATE]]})
+        out = self.run_changes_in_node(tail, store={}, edit="d.environment = '';")
+        self.assertEqual(out["sets"], [["script-map-seen-production", self.C1_DATE]])
+        out = self.run_changes_in_node(
+            tail, store={"script-map-seen-Sandbox": "2026-10-13T20:00:00Z"},
+            edit="d.environment = 'Sandbox';")
+        self.assertEqual(out, {"banner": True, "sets": []})
+
+    def test_seen_storage_unavailable(self):
+        tail = """
+var out = { banner: bannerState(), marks: entryMarks(), modes: changesState().modes,
+            list: snapshot().list.sort() };
+navTo('changes');
+out.count = changesState().count;
+console.log(JSON.stringify(out));
+"""
+        for kind in ("throwing", "no window"):
+            with self.subTest(kind=kind):
+                out = self.run_changes_in_node(tail, throwing=kind == "throwing")
+                self.assertIsNone(out["banner"])
+                self.assertEqual(out["marks"], {"Req.Dep.js": [], "hold.js": [],
+                                                "req_other.js": []})
+                self.assertEqual(out["modes"][1], ["Since your last visit (0)", "false", True])
+                self.assertEqual(out["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
+                self.assertEqual(out["count"], "3 changes")
+
+    def test_new_badge_and_updated_dot_on_entries_and_cards(self):
+        tail = """
+navTo('risk');
+console.log(JSON.stringify({ marks: entryMarks(), cards: cardMarks() }));
+"""
+        added = """
+var added = { 'Req.Dep.js': '2026-10-02T12:00:00Z', 'hold.js': '2026-09-30T12:00:00Z',
+              'req_other.js': '2026-10-17T12:00:00Z' };
+d.nodes.forEach(function (n) { if (n.kind === 'script') { n.added_at = added[n.name]; } });
+"""
+        out = self.run_changes_in_node(tail, edit=added, store={
+            "script-map-seen-Production": "2026-10-14T10:00:00Z"})
+        new = ["mark mark-new", "NEW", None, None]
+        dot = ["updated-dot", "●", "Updated since your last visit",
+               "Updated since your last visit"]
+        # 13 days old: NEW; 15 days old or 2 days ahead: not NEW. Only Req.Dep.js
+        # changed after the stored date, so only it has the dot.
+        self.assertEqual(out["marks"], {"Req.Dep.js": [new, dot], "hold.js": [],
+                                        "req_other.js": []})
+        self.assertEqual(out["cards"], out["marks"])
+        edge = """
+var added = { 'Req.Dep.js': '2026-10-16T06:00:00Z', 'hold.js': 'not a date',
+              'req_other.js': '2026-10-01T12:00:00Z' };
+d.nodes.forEach(function (n) { if (n.kind === 'script') { n.added_at = added[n.name]; } });
+"""
+        out = self.run_changes_in_node(tail, edit=edge)
+        # No storage: no dots. Exactly 14 days old and under a day ahead still count as NEW.
+        self.assertEqual(out["marks"], {"Req.Dep.js": [new], "hold.js": [],
+                                        "req_other.js": [new]})
+        self.assertEqual(out["cards"], out["marks"])
+
 
 DOM_SHIM = r"""
 function Elem(tag) {
@@ -4264,7 +4797,7 @@ function statusReport() {
 // Nav buttons for view switching: document.querySelectorAll('nav button') returns them.
 var NAV = [];
 function enableNav() {
-    NAV = ['inventory', 'records', 'risk'].map(function (v) {
+    NAV = ['inventory', 'records', 'risk', 'changes'].map(function (v) {
         var b = new Elem('button'); b.setAttribute('data-view', v); return b;
     });
     document.querySelectorAll = function (sel) { return sel === 'nav button' ? NAV : []; };
