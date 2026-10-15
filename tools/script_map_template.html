@@ -654,13 +654,19 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         }
         return '';
     }
+    // Returns false when the write throws. Tracking is then off for the rest of the session:
+    // no updated dots, no unseen changes and the Changes view back in All mode.
     function writeSeen() {
         var newest = changes.length ? textOf(changes[0].date) : '';
-        if (!storageOk || !newest) { return; }
+        if (!storageOk || !newest) { return true; }
         try {
             window.localStorage.setItem(SEEN_KEY, newest);
+            return true;
         } catch (e) {
-            // Storage is unavailable, so the next visit shows these changes again.
+            storageOk = false;
+            unseen = [];
+            changesMode = 'all';
+            return false;
         }
     }
     var storedSeen = readSeen();
@@ -673,7 +679,7 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
         }
     }
     function laterThanSeen(value) {
-        if (!seenAt || typeof value !== 'string') { return false; }
+        if (!storageOk || !seenAt || typeof value !== 'string') { return false; }
         var t = Date.parse(value);
         return !isNaN(t) && t > Date.parse(seenAt);
     }
@@ -1985,11 +1991,14 @@ button.tile { font: inherit; color: inherit; text-align: left; cursor: pointer; 
     }
 
     function markSeen() {
+        var failed = false;
         if (!seenWritten) {
             seenWritten = true;
-            writeSeen();
+            failed = !writeSeen();
         }
         hideBanner();
+        // The write failed: re-render so the dots and the Since count go away.
+        if (failed) { renderAll(); }
     }
 
     function showBanner() {

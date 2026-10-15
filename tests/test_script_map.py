@@ -4497,6 +4497,85 @@ console.log(JSON.stringify(out));
                 self.assertEqual(out["list"], ["Req.Dep.js", "hold.js", "req_other.js"])
                 self.assertEqual(out["count"], "3 changes")
 
+    def test_seen_storage_write_fails(self):
+        # getItem works but setItem throws: tracking shows at load and turns off at the
+        # first write, so the dots and the Since count go away. NEW does not use storage.
+        extra = """
+var window = {};
+window.localStorage = {
+    getItem: function (k) {
+        return k === 'script-map-seen-Production' ? '2026-10-13T20:00:00Z' : null;
+    },
+    setItem: function () { throw new Error('quota'); }
+};
+"""
+        added = """
+d.nodes.forEach(function (n) {
+    if (n.name === 'hold.js') { n.added_at = '2026-10-02T12:00:00Z'; }
+});
+"""
+        new = ["mark mark-new", "NEW", None, None]
+        dot = ["updated-dot", "●", "Updated since your last visit",
+               "Updated since your last visit"]
+        no_dots = {"Req.Dep.js": [], "hold.js": [new], "req_other.js": []}
+        all_modes = [["All", "true", False], ["Since your last visit (0)", "false", True]]
+        tail = """
+var out = { banner: !!bannerState(), marks: entryMarks(), cards: cardMarks(),
+            modes: changesState().modes };
+click(bannerButton('Dismiss'));
+out.after = { banner: bannerState(), marks: entryMarks(), cards: cardMarks(),
+              modes: changesState().modes, shown: views() };
+navTo('changes');
+out.view = { shown: views(), count: changesState().count, modes: changesState().modes };
+console.log(JSON.stringify(out));
+"""
+        out = self.run_changes_in_node(tail, extra=extra, edit=added)
+        self.assertTrue(out["banner"])
+        self.assertEqual(out["marks"], {"Req.Dep.js": [dot], "hold.js": [new, dot],
+                                        "req_other.js": []})
+        self.assertEqual(out["cards"], out["marks"])
+        self.assertEqual(out["modes"], [["All", "true", False],
+                                        ["Since your last visit (2)", "false", False]])
+        after = out["after"]
+        self.assertIsNone(after["banner"])
+        self.assertEqual(after["marks"], no_dots)
+        self.assertEqual(after["cards"], no_dots)
+        self.assertEqual(after["modes"], all_modes)
+        self.assertEqual(after["shown"], ["view-inventory"])
+        self.assertEqual(out["view"], {"shown": ["view-changes"], "count": "3 changes",
+                                       "modes": all_modes})
+        opens = {
+            "see changes": "click(bannerButton('See changes'));",
+            "nav": "navTo('changes');",
+        }
+        for kind, action in opens.items():
+            with self.subTest(open=kind):
+                tail = action + """
+console.log(JSON.stringify({ banner: bannerState(), shown: views(),
+                             count: changesState().count, modes: changesState().modes,
+                             marks: entryMarks(), cards: cardMarks() }));
+"""
+                out = self.run_changes_in_node(tail, extra=extra, edit=added)
+                self.assertIsNone(out["banner"])
+                self.assertEqual(out["shown"], ["view-changes"])
+                self.assertEqual(out["count"], "3 changes")
+                self.assertEqual(out["modes"], all_modes)
+                self.assertEqual(out["marks"], no_dots)
+                self.assertEqual(out["cards"], no_dots)
+        # A hash that opens the Changes view at load also ends with tracking off.
+        tail = """
+console.log(JSON.stringify({ banner: bannerState(), shown: views(),
+                             count: changesState().count, modes: changesState().modes,
+                             marks: entryMarks() }));
+"""
+        out = self.run_changes_in_node(tail, hash_="#view=changes", edit=added,
+                                       extra=extra.replace("var window = {};\n", ""))
+        self.assertIsNone(out["banner"])
+        self.assertEqual(out["shown"], ["view-changes"])
+        self.assertEqual(out["count"], "3 changes")
+        self.assertEqual(out["modes"], all_modes)
+        self.assertEqual(out["marks"], no_dots)
+
     def test_new_badge_and_updated_dot_on_entries_and_cards(self):
         tail = """
 navTo('risk');
