@@ -2419,6 +2419,208 @@ console.log(JSON.stringify(out));
                          [("A:ue.js", "ue.js"), ("", "x.js")])
         self.assertEqual(self.scripts(data)["ue.js"]["added_at"], "2026-03-03T00:00:00Z")
 
+    # --ns-only: app repos count only tagged SuiteScript files
+
+    APP_FILES = {
+        "src/app.js": "export const app = () => fetch('/api');\n",
+        "netlify/functions/api.js": "exports.handler = async () => ({ statusCode: 200 });\n",
+        "NetSuite/so_ue.js": USER_EVENT,
+        "node_modules/pkg/x.js": USER_EVENT,
+        "dist/bundle.js": USER_EVENT,
+    }
+
+    def make_app_repo(self, name="app"):
+        repo = self.make_repo(name)
+        for rel, text in self.APP_FILES.items():
+            self.write(f"{name}/{rel}", text)
+        return repo
+
+    def test_ns_only_counts_only_tagged_scripts(self):
+        repo = self.make_app_repo()
+        data = script_map.collect([("A", repo)], ns_only={"A"})
+        self.assertEqual(set(self.scripts(data)), {"NetSuite/so_ue.js"})
+        self.assertEqual(data["repos"][0]["script_count"], 1)
+        self.assertEqual(data["skipped"], [])
+        mentioned = json.dumps(data["nodes"]) + json.dumps(data["edges"])
+        for rel in ("src/app.js", "netlify/functions/api.js", "node_modules/pkg/x.js",
+                    "dist/bundle.js"):
+            self.assertNotIn(rel, mentioned)
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        page = self.read_data()[1]
+        self.assertEqual(set(self.scripts(page)), {"NetSuite/so_ue.js"})
+        self.assertEqual(page["skipped"], [])
+        self.assertIn("1 scripts", out)
+        self.assertIn("0 skipped", out)
+
+    def test_without_ns_only_app_repo_scanned_as_today(self):
+        repo = self.make_app_repo()
+        data = script_map.collect([("A", repo)])
+        self.assertEqual(data, script_map.collect([("A", repo)], ns_only=set()))
+        self.assertEqual(data, script_map.collect([("A", repo)], ns_only={"B"}))
+        self.assertEqual(set(self.scripts(data)), {"NetSuite/so_ue.js", "dist/bundle.js"})
+        self.assertEqual(data["repos"][0]["script_count"], 2)
+        self.assertEqual(
+            sorted((s["path"], s["reason"]) for s in data["skipped"]),
+            [("netlify/functions/api.js", "not SuiteScript"),
+             ("src/app.js", "not SuiteScript")])
+        self.assertNotIn("node_modules/pkg/x.js", json.dumps(data))
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(set(self.scripts(self.read_data()[1])),
+                         {"NetSuite/so_ue.js", "dist/bundle.js"})
+
+    def test_ns_only_tag_beyond_head_ignored(self):
+        repo = self.make_repo("app")
+        self.write("app/late.js", "// " + "x" * 3990 + "\n// filler\n" + USER_EVENT)
+        self.write("app/edge.js", "x" * 3989 + "@NApiVersion 2.1\n")
+        self.write("app/fits.js", "x" * 3988 + "@NApiVersion 2.1\n")
+        data = script_map.collect([("A", repo)], ns_only={"A"})
+        self.assertEqual(set(self.scripts(data)), {"fits.js"})
+        self.assertEqual(data["skipped"], [])
+        normal = script_map.collect([("A", repo)])
+        self.assertEqual(set(self.scripts(normal)), {"late.js", "edge.js", "fits.js"})
+
+    def test_ns_only_tags_case_sensitive_and_oversized_bundle_ignored(self):
+        repo = self.make_repo("app")
+        self.write("app/lower.js", "/** @napiversion 2.1 @nscripttype UserEventScript */\n")
+        self.write("app/big.js", "var a = 1;\n" * (script_map.MAX_BYTES // 10))
+        self.write("app/st.js", "/** @NScriptType Suitelet */\n")
+        data = script_map.collect([("A", repo)], ns_only={"A"})
+        self.assertEqual(set(self.scripts(data)), {"st.js"})
+        self.assertEqual(data["skipped"], [])
+        normal = script_map.collect([("A", repo)])
+        self.assertIn({"repo": "A", "path": "big.js", "reason": "too large"},
+                      normal["skipped"])
+
+    def test_ns_only_extra_excluded_dirs(self):
+        repo = self.make_repo("app")
+        for folder in ("build", "coverage", "vendor", ".netlify", "Dist", "a/node_modules",
+                       "deep/x/dist"):
+            self.write(f"app/{folder}/s.js", USER_EVENT)
+        self.write("app/keep/s.js", USER_EVENT)
+        data = script_map.collect([("A", repo)], ns_only={"A"})
+        self.assertEqual(set(self.scripts(data)), {"keep/s.js"})
+        normal = set(self.scripts(script_map.collect([("A", repo)])))
+        self.assertIn("build/s.js", normal)
+        self.assertIn("vendor/s.js", normal)
+        self.assertIn(".netlify/s.js", normal)
+
+    def test_ns_only_unreadable_file_still_reported(self):
+        repo = self.make_repo("app")
+        self.write("app/ue.js", USER_EVENT)
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if str(path).endswith("ue.js"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", failing_open):
+            data = script_map.collect([("A", repo)], ns_only={"A"})
+        self.assertEqual(data["skipped"], [
+            {"repo": "A", "path": "ue.js", "reason": "unreadable: Permission denied"}])
+
+    def test_ns_only_unknown_label_exits_2(self):
+        repo = self.make_app_repo()
+        code, out, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                        "--ns-only", "NOPE"])
+        self.assertEqual(code, 2)
+        self.assertIn("error: --ns-only NOPE has no matching --repo", err)
+        self.assertEqual(out, "")
+        self.assertFalse(self.out.exists())
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--ns-only", "A", "--ns-only", "NOPE"])
+        self.assertEqual(code, 2)
+        self.assertIn("error: --ns-only NOPE has no matching --repo", err)
+        self.assertFalse(self.out.exists())
+
+    def test_ns_only_repeated_label_same_as_once(self):
+        repo = self.make_app_repo()
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        once = self.read_data()[1]
+        code, _, err = self.run_main(["--repo", f"A={repo}", "--out", str(self.out),
+                                      "--ns-only", "A", "--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        twice = self.read_data()[1]
+        for data in (once, twice):
+            data.pop("generated_at")
+        self.assertEqual(once, twice)
+
+    def test_help_mentions_ns_only(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--ns-only", result.stdout)
+
+    def test_ns_only_changes_keep_only_script_files(self):
+        repo = self.make_app_repo()
+        changes = script_map.normalize_changes([
+            self.change("A", self.SHA_A, "2026-03-04T00:00:00Z",
+                        [("src/app.js", "modified"), ("NetSuite/so_ue.js", "modified")]),
+            self.change("A", self.SHA_B, "2026-03-03T00:00:00Z", [("src/app.js", "modified")]),
+            self.change("A", self.SHA_C, "2026-03-02T00:00:00Z",
+                        [("NetSuite/old.js", "removed")]),
+            self.change("A", self.SHA_D, "2026-03-01T00:00:00Z",
+                        [("NetSuite/so_ue.js", "added"), ("src/new.js", "added")]),
+        ])
+        data = script_map.collect([("A", repo)], git_changes=changes, ns_only={"A"})
+        self.assertEqual([c["commit"] for c in data["changes"]], [self.SHA_A, self.SHA_D])
+        self.assertEqual(data["changes"][0]["files"], [
+            {"path": "NetSuite/so_ue.js", "status": "modified", "id": "A:NetSuite/so_ue.js",
+             "name": "so_ue.js"}])
+        self.assertEqual([f["path"] for f in data["changes"][1]["files"]],
+                         ["NetSuite/so_ue.js"])
+        self.assertEqual(self.scripts(data)["NetSuite/so_ue.js"]["added_at"],
+                         "2026-03-01T00:00:00Z")
+
+    def test_removed_empty_id_kept_for_normal_repo_only(self):
+        repo = self.make_app_repo()
+        changes = script_map.normalize_changes([
+            self.change("A", self.SHA_A, "2026-03-02T00:00:00Z",
+                        [("NetSuite/old.js", "removed")]),
+            self.change("A", self.SHA_B, "2026-03-01T00:00:00Z",
+                        [("src/app.js", "modified"), ("src/new.js", "added")]),
+        ])
+        normal = script_map.collect([("A", repo)], git_changes=changes)
+        self.assertEqual([c["commit"] for c in normal["changes"]], [self.SHA_A])
+        self.assertEqual(normal["changes"][0]["files"], [
+            {"path": "NetSuite/old.js", "status": "removed", "id": "", "name": "old.js"}])
+        app = script_map.collect([("A", repo)], git_changes=changes, ns_only={"A"})
+        self.assertEqual(app["changes"], [])
+
+    def test_ns_only_on_other_repo_leaves_normal_repo_unchanged(self):
+        normal_repo = self.make_app_repo("normal")
+        self.write("normal/lib.js", LIBRARY)
+        app_repo = self.make_app_repo("app")
+        files = [("src/app.js", "modified"), ("NetSuite/so_ue.js", "modified"),
+                 ("dist/bundle.js", "added"), ("gone.js", "removed")]
+        changes = script_map.normalize_changes([
+            self.change("A", self.SHA_A, "2026-03-02T00:00:00Z", files),
+            self.change("B", self.SHA_B, "2026-03-01T00:00:00Z", files),
+        ])
+        repos = [("A", normal_repo), ("B", app_repo)]
+        both_normal = script_map.collect(repos, git_changes=changes)
+        mixed = script_map.collect(repos, git_changes=changes, ns_only={"B"})
+
+        def only_a(data):
+            return ([n for n in data["nodes"] if n["repo"] == "A"],
+                    [e for e in data["edges"] if e["source"].startswith("A:")],
+                    [r for r in data["repos"] if r["label"] == "A"],
+                    [s for s in data["skipped"] if s["repo"] == "A"],
+                    [c for c in data["changes"] if c["repo"] == "A"])
+
+        self.assertEqual(only_a(both_normal), only_a(mixed))
+        self.assertEqual(only_a(mixed)[2][0]["script_count"], 3)
+        a_changes = only_a(mixed)[4]
+        self.assertEqual([f["path"] for f in a_changes[0]["files"]],
+                         ["NetSuite/so_ue.js", "dist/bundle.js", "gone.js"])
+        b_changes = [c for c in mixed["changes"] if c["repo"] == "B"]
+        self.assertEqual([f["path"] for f in b_changes[0]["files"]], ["NetSuite/so_ue.js"])
+
     def test_normalize_changes_malformed(self):
         for value in (None, {}, "x", 5, {"changes": []}):
             with self.subTest(value=value):

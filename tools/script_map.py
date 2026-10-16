@@ -8,7 +8,7 @@ Usage: python3 tools/script_map.py --repo LABEL=PATH [--repo LABEL=PATH ...]
                                    [--switch-url PATH --switch-label TEXT]
                                    [--missing-repo LABEL ...]
                                    [--summary-namespace NAME] [--team NAME ...]
-                                   [--git-info FILE]
+                                   [--git-info FILE] [--ns-only LABEL ...]
 
 Each PATH must be an existing directory. If PATH/.git is a directory, its HEAD
 file must read exactly "ref: refs/heads/NAME", where NAME is --branch (default
@@ -88,6 +88,22 @@ when a script node with that id is on the page (else "") and "name" is the
 path's last segment. Each script node gets "added_at": the "date" of the
 newest page change listing its path with status "added", else "". A file
 without "changes" or "changes_since" loads with [], "" and "added_at" "".
+On every page, a change file entry whose "id" is "" and whose "status" is not
+"removed" is dropped (it is not a script on the page), and a change whose files
+are all dropped this way is dropped too.
+
+--ns-only LABEL (repeatable) marks the --repo with that LABEL as an app repo
+that mixes SuiteScript with other JavaScript; a LABEL with no matching --repo
+prints "error: --ns-only LABEL has no matching --repo" and exits 2 without
+writing anything. In such a repo the walk also skips every directory named
+node_modules, .git, .netlify, dist, build, coverage or vendor at any depth, and
+a *.js file is a script only if its first 4,000 characters contain
+"@NApiVersion" or "@NScriptType" (case-sensitive). Every other file is ignored
+entirely: it gets no node, records, risk or summary, is not listed in
+"skipped" and is not counted anywhere. In that repo's changes, file entries
+with an "id" of "" are dropped whatever their status (a removed file cannot be
+confirmed as SuiteScript), and a change left with no files is dropped. Repos
+without --ns-only are scanned exactly as before.
 """
 
 import argparse
@@ -109,6 +125,12 @@ EXCLUDED_DIRS = {
     ".git", "node_modules", "backups", "backup", "temp-handoffs",
     "tests", "test", "sandbox",
 }
+NS_ONLY_EXCLUDED_DIRS = {
+    "node_modules", ".git", ".netlify", "dist", "build", "coverage", "vendor",
+}
+NS_ONLY_HEAD_CHARS = 4000
+NS_ONLY_HEAD_BYTES = 16000
+NS_ONLY_TAGS = ("@NApiVersion", "@NScriptType")
 
 ENTRY_POINTS = [
     "beforeLoad", "beforeSubmit", "afterSubmit", "pageInit", "fieldChanged",
@@ -717,14 +739,16 @@ def basename_key(path):
     return name.lower()
 
 
-def js_files(root, errors=None):
+def js_files(root, errors=None, extra_excluded=()):
     """Yield (relative_posix_path, absolute_path) for candidate *.js files.
 
     OSErrors from listing directories are appended to errors when it is a list.
+    Directory names in extra_excluded are skipped as well as EXCLUDED_DIRS.
     """
     onerror = errors.append if errors is not None else None
+    excluded = EXCLUDED_DIRS | set(extra_excluded)
     for dirpath, dirnames, filenames in os.walk(root, onerror=onerror, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d.lower() not in EXCLUDED_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in excluded)
         for name in sorted(filenames):
             lower = name.lower()
             if not lower.endswith(".js") or lower.endswith(".min.js"):
@@ -734,7 +758,7 @@ def js_files(root, errors=None):
 
 
 def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None,
-            git_repos=None, git_changes=None, changes_since=""):
+            git_repos=None, git_changes=None, changes_since="", ns_only=None):
     """Return the JSON-serializable map data for [(label, Path), ...].
 
     summaries is the "entries" dict of a summary cache (see load_summary_cache).
@@ -744,7 +768,11 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
     git_repos its "repos" dict of LABEL -> GitHub "OWNER/REPO" slug.
     git_changes is its "changes" list (see normalize_changes) and changes_since
     its "changes_since" string.
+    ns_only is the set of labels whose repos count only files tagged in their first
+    NS_ONLY_HEAD_CHARS characters (see the module docstring); other files there are
+    ignored without a "skipped" entry.
     """
+    ns_only = set(ns_only or ())
     summaries = summaries or {}
     git_info = git_info or {}
     git_repos = git_repos or {}
@@ -773,8 +801,16 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
         root = Path(root)
         scripts = []
         walk_errors = []
-        for rel, full in js_files(root, walk_errors):
+        app_repo = label in ns_only
+        extra = NS_ONLY_EXCLUDED_DIRS if app_repo else ()
+        for rel, full in js_files(root, walk_errors, extra):
             try:
+                if app_repo:
+                    with open(full, "rb") as handle:
+                        head = handle.read(NS_ONLY_HEAD_BYTES)
+                    head = head.decode("utf-8", errors="replace")[:NS_ONLY_HEAD_CHARS]
+                    if not any(tag in head for tag in NS_ONLY_TAGS):
+                        continue
                 if os.path.getsize(full) > MAX_BYTES:
                     skipped.append({"repo": label, "path": rel, "reason": "too large"})
                     continue
@@ -939,11 +975,15 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
         for entry in change["files"]:
             path = entry["path"]
             node = scripts_by_id.get(f"{label}:{path}")
+            if not node and (entry["status"] != "removed" or label in ns_only):
+                continue
             files.append({"path": path, "status": entry["status"],
                           "id": node["id"] if node else "",
                           "name": path.rsplit("/", 1)[-1]})
             if node and entry["status"] == "added" and change["date"] > node["added_at"]:
                 node["added_at"] = change["date"]
+        if change["files"] and not files:
+            continue
         changes.append(dict(change, files=files,
                             commit_url=commit_url(slug, change["commit"]),
                             pr_url=pr_url(slug, change["pr"])))
@@ -993,6 +1033,10 @@ def main(argv=None):
                              f"(1-{MAX_TEAM_NAME} characters); repeatable")
     parser.add_argument("--git-info", default=None, metavar="FILE",
                         help="last-change file written by script_map_gitinfo.py")
+    parser.add_argument("--ns-only", action="append", default=None, metavar="LABEL",
+                        help="--repo LABEL whose scripts must carry @NApiVersion or "
+                             "@NScriptType in their first 4,000 characters; other files "
+                             "and build folders are ignored; repeatable")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -1049,6 +1093,11 @@ def main(argv=None):
             return 2
         labels.add(label)
         repos.append((label, path))
+    ns_only = set(args.ns_only or [])
+    for label in args.ns_only or []:
+        if label not in labels:
+            print(f"error: --ns-only {label} has no matching --repo", file=sys.stderr)
+            return 2
 
     warnings = []
     for label, path in repos:
@@ -1099,7 +1148,8 @@ def main(argv=None):
     try:
         data = collect(repos, entries, args.branch, args.summary_namespace,
                        git_info=git_files, git_repos=git_repos,
-                       git_changes=git_changes, changes_since=changes_since)
+                       git_changes=git_changes, changes_since=changes_since,
+                       ns_only=ns_only)
     except OSError as exc:
         for label, path in repos:
             head = path / ".git" / "HEAD"
