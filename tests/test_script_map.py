@@ -854,6 +854,64 @@ class ScriptMapTest(unittest.TestCase):
         self.assertEqual(records[0]["label"], "Customer Deposit")
         self.assertIn(("A:UserEvent/cd.js", "A:customerdeposit", "deploy"), self.edges(data))
 
+    def record_label_node(self, header, body, record_id):
+        repo = self.make_repo("a")
+        self.write("a/UserEvent/rl.js",
+                   "/**\n * @NApiVersion 2.1\n * @NScriptType UserEventScript\n"
+                   + header + " */\n"
+                   "define(['N/record'], (record) => { const beforeLoad = () => {\n"
+                   + body + "\n}; return { beforeLoad }; });\n")
+        data = self.collect_one(repo)
+        records = [n for n in data["nodes"]
+                   if n["kind"] == "record" and n["record_id"] == record_id]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["id"], f"A:{record_id}")
+        return records[0]
+
+    def test_record_label_sales_order_enum(self):
+        node = self.record_label_node(
+            "", "record.load({ type: record.Type.SALES_ORDER, id: 1 });", "salesorder")
+        self.assertEqual(node["label"], "Sales Order")
+        self.assertEqual(node["category"], "Sales")
+
+    def test_record_label_inventory_item_enum(self):
+        node = self.record_label_node(
+            "", "record.load({ type: record.Type.INVENTORY_ITEM, id: 1 });", "inventoryitem")
+        self.assertEqual(node["label"], "Inventory Item")
+
+    def test_record_label_multi_word_deploy(self):
+        node = self.record_label_node(" * DEPLOY ON: Customer Deposit\n", "", "customerdeposit")
+        self.assertEqual(node["label"], "Customer Deposit")
+
+    def test_record_label_parenthesized_deploy_beats_table(self):
+        node = self.record_label_node(" * DEPLOY ON: salesorder (SO approval)\n", "",
+                                      "salesorder")
+        self.assertEqual(node["label"], "SO approval")
+
+    def test_record_label_plain_deploy_uses_table(self):
+        node = self.record_label_node(" * DEPLOY ON: salesorder\n", "", "salesorder")
+        self.assertEqual(node["label"], "Sales Order")
+
+    def test_record_label_customrecord_keeps_id(self):
+        node = self.record_label_node(
+            "", "var t = 'customrecord_mbsg_log';", "customrecord_mbsg_log")
+        self.assertEqual(node["label"], "customrecord_mbsg_log")
+
+    def test_record_label_unknown_id_keeps_id(self):
+        node = self.record_label_node(
+            "", "record.load({ type: 'mythingrecord', id: 1 });", "mythingrecord")
+        self.assertEqual(node["label"], "mythingrecord")
+
+    def test_record_labels_cover_record_areas(self):
+        for record_id in script_map.RECORD_AREAS:
+            self.assertIn(record_id, script_map.RECORD_LABELS)
+        for record_id, label in script_map.RECORD_LABELS.items():
+            self.assertEqual(record_id, record_id.lower())
+            self.assertIsInstance(label, str)
+            self.assertTrue(label)
+            self.assertLessEqual(len(label), 60)
+        self.assertEqual(len(script_map.RECORD_LABELS), 81)
+
     def test_touched_records(self):
         text = """
 record.load({ type: record.Type.SALES_ORDER });
