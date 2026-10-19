@@ -1394,6 +1394,175 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 1 failed, "
                               f"0 deferred, 0 pruned -> {self.cache}\n")
 
+    # --ns-only: app repos summarize only tagged SuiteScript files
+
+    APP_FILES = {
+        "src/app.js": "export const app = () => fetch('/api');\n",
+        "netlify/functions/api.js": "exports.handler = async () => ({ statusCode: 200 });\n",
+        "NetSuite/so_ue.js": USER_EVENT,
+        "node_modules/pkg/x.js": USER_EVENT,
+        "dist/bundle.js": USER_EVENT,
+        "NetSuite/late_tag.js": "// " + "x" * 3990 + "\n// filler\n" + USER_EVENT,
+    }
+
+    def make_app_repo(self, name="app"):
+        return self.make_repo(name, self.APP_FILES)
+
+    def test_ns_only_summarizes_only_tagged_scripts(self):
+        repo = self.make_app_repo()
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("File: NetSuite/so_ue.js\n", self.prompt_user(call.call_args))
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:NetSuite/so_ue.js"})
+        self.assertEqual(entries["A:NetSuite/so_ue.js"]["sha256"],
+                         self.sha(repo / "NetSuite" / "so_ue.js"))
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 1 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+        # A second run finds the one entry cached and nothing else.
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        call.assert_not_called()
+        self.assertEqual(out, f"script_map_summarize: 1 cached, 0 reused, 0 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_without_ns_only_app_repo_summarized_as_today(self):
+        repo = self.make_app_repo()
+        code, out, err, call = self.run_main(self.args(("A", repo)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(set(self.read_cache()["entries"]),
+                         {"A:NetSuite/so_ue.js", "A:dist/bundle.js", "A:NetSuite/late_tag.js"})
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 2 new, 0 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_ns_only_unknown_label_exits_2_without_touching_cache(self):
+        repo = self.make_app_repo()
+        for extra in (["--ns-only", "NOPE"], ["--ns-only", "A", "--ns-only", "NOPE"]):
+            with self.subTest(extra=extra):
+                self.assertFalse(self.cache.exists())
+                code, out, err, call = self.run_main(self.args(("A", repo)) + extra)
+                self.assertEqual(code, 2)
+                self.assertEqual(err, "error: --ns-only NOPE has no matching --repo\n")
+                self.assertEqual(out, "")
+                call.assert_not_called()
+                self.assertFalse(self.cache.exists())
+        self.write_cache({"A:dist/bundle.js": self.entry("0" * 64)})
+        before = self.cache.read_bytes()
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--ns-only", "NOPE"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "error: --ns-only NOPE has no matching --repo\n")
+        self.assertEqual(out, "")
+        call.assert_not_called()
+        self.assertEqual(self.cache.read_bytes(), before)
+
+    def test_ns_only_prunes_non_qualifying_entries(self):
+        repo = self.make_app_repo()
+        sha = self.sha(repo / "dist" / "bundle.js")
+        other = self.entry(sha, "Other repo.")
+        self.write_cache({"A:dist/bundle.js": self.entry(sha, "Bundle."),
+                          "A:src/app.js": self.entry("1" * 64),
+                          "sandbox|A:dist/bundle.js": self.entry(sha, "Sandbox."),
+                          "B:dist/bundle.js": other})
+        code, out, err, call = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        entries = self.read_cache()["entries"]
+        self.assertEqual(set(entries), {"A:NetSuite/so_ue.js", "sandbox|A:dist/bundle.js",
+                                        "B:dist/bundle.js"})
+        # so_ue.js has the same bytes as the pruned bundle, so it is reused.
+        call.assert_not_called()
+        self.assertEqual(entries["A:NetSuite/so_ue.js"]["trigger"], "reused")
+        self.assertEqual(entries["B:dist/bundle.js"], other)
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 1 reused, 0 new, 0 failed, "
+                              f"0 deferred, 2 pruned -> {self.cache}\n")
+
+    def test_ns_only_unreadable_file_counts_failed(self):
+        repo = self.make_app_repo()
+        sha = self.sha(repo / "NetSuite" / "so_ue.js")
+        old = self.entry(sha)
+        self.write_cache({"A:NetSuite/so_ue.js": old})
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if str(path).endswith("so_ue.js"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", failing_open):
+            code, out, err, call = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 3)
+        call.assert_not_called()
+        self.assertEqual(err, "warning: A:NetSuite/so_ue.js summary failed: unreadable: "
+                              "Permission denied\n")
+        self.assertEqual(self.read_cache()["entries"], {"A:NetSuite/so_ue.js": old})
+        self.assertEqual(out, f"script_map_summarize: 0 cached, 0 reused, 0 new, 1 failed, "
+                              f"0 deferred, 0 pruned -> {self.cache}\n")
+
+    def test_ns_only_leaves_normal_repo_unchanged(self):
+        normal = self.make_repo("normal", {"st.js": SUITELET, "lib/plain.js": "var a = 1;\n",
+                                           "big.js": "var a = 1;\n" * (script_map.MAX_BYTES // 10),
+                                           "dist/b.js": SUITELET.replace("Suitelet",
+                                                                         "Restlet")})
+        app = self.make_app_repo()
+
+        def run(argv):
+            if self.cache.exists():
+                self.cache.unlink()
+            with mock.patch.object(script_map_summarize, "datetime") as fake:
+                fake.now.return_value.strftime.return_value = "2026-01-02T00:00:00Z"
+                code, out, err, call = self.run_main(argv)
+            self.assertIn(code, (0, 3), err)
+            entries = {k: v for k, v in self.read_cache()["entries"].items()
+                       if k.startswith("B:")}
+            warnings = [line for line in err.splitlines() if line.startswith("warning: B:")]
+            return entries, warnings
+
+        alone = run(self.args(("B", normal)))
+        mixed = run(self.args(("A", app), ("B", normal)) + ["--ns-only", "A"])
+        self.assertEqual(alone, mixed)
+        self.assertEqual(set(alone[0]), {"B:st.js", "B:dist/b.js"})
+        self.assertEqual(alone[1], ["warning: B:big.js skipped: too large"])
+
+    def test_ns_only_parity_with_script_map(self):
+        repo = self.make_app_repo()
+        self.write(repo, "NetSuite/lib.js", "/** @NApiVersion 2.1 */\n"
+                                            "define([], () => ({ helper: () => 1 }));\n")
+        self.write(repo, "build/out.js", USER_EVENT)
+        self.write(repo, "NetSuite/st.js", SUITELET)
+        code, _, err, _ = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        keys = set(self.read_cache()["entries"])
+        data = script_map.collect([("A", repo)], ns_only={"A"})
+        ids = {n["id"] for n in data["nodes"]
+               if n["kind"] == "script" and n["id"].startswith("A:")}
+        self.assertEqual(keys, ids)
+        self.assertIn("A:NetSuite/so_ue.js", keys)
+        self.assertNotIn("A:build/out.js", keys)
+
+    def test_ns_only_repeated_label_same_as_once(self):
+        repo = self.make_app_repo()
+        code, once, err, _ = self.run_main(self.args(("A", repo)) + ["--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        first = self.read_cache()["entries"]
+        self.cache.unlink()
+        code, twice, err, _ = self.run_main(self.args(("A", repo))
+                                            + ["--ns-only", "A", "--ns-only", "A"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(twice, once)
+        self.assertEqual(set(self.read_cache()["entries"]), set(first))
+
+    def test_help_and_docstring_mention_ns_only(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--help"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--ns-only", result.stdout)
+        self.assertIn("[--ns-only LABEL ...]", script_map_summarize.__doc__)
+        self.assertIn("ns_only_script", script_map_summarize.__doc__)
+        self.assertIn("--ns-only", script_map.__doc__)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,7 +100,9 @@ prints "error: --ns-only LABEL has no matching --repo" and exits 2 without
 writing anything. In such a repo the walk also skips every directory named
 node_modules, .git, .netlify, dist, build, coverage or vendor at any depth, and
 a *.js file is a script only if its first 4,000 characters contain
-"@NApiVersion" or "@NScriptType" (case-sensitive). Every other file is ignored
+"@NApiVersion" or "@NScriptType" (case-sensitive); this check is
+ns_only_script(), and tools/script_map_summarize.py --ns-only uses the same
+rule. Every other file is ignored
 entirely: it gets no node, records, risk or summary, is not listed in
 "skipped" and is not counted anywhere. In that repo's changes, file entries
 with an "id" of "" are dropped whatever their status (a removed file cannot be
@@ -843,6 +845,19 @@ def js_files(root, errors=None, extra_excluded=()):
             yield full.relative_to(root).as_posix(), full
 
 
+def ns_only_script(path):
+    """Return True when an --ns-only repo's file at path counts as a script.
+
+    That is when its first NS_ONLY_HEAD_CHARS characters (at most NS_ONLY_HEAD_BYTES
+    bytes, decoded as UTF-8 with errors="replace") contain any of NS_ONLY_TAGS.
+    Raises OSError when the file cannot be read.
+    """
+    with open(path, "rb") as handle:
+        head = handle.read(NS_ONLY_HEAD_BYTES)
+    head = head.decode("utf-8", errors="replace")[:NS_ONLY_HEAD_CHARS]
+    return any(tag in head for tag in NS_ONLY_TAGS)
+
+
 def collect(repos, summaries=None, branch="main", summary_namespace="", git_info=None,
             git_repos=None, git_changes=None, changes_since="", ns_only=None):
     """Return the JSON-serializable map data for [(label, Path), ...].
@@ -891,12 +906,8 @@ def collect(repos, summaries=None, branch="main", summary_namespace="", git_info
         extra = NS_ONLY_EXCLUDED_DIRS if app_repo else ()
         for rel, full in js_files(root, walk_errors, extra):
             try:
-                if app_repo:
-                    with open(full, "rb") as handle:
-                        head = handle.read(NS_ONLY_HEAD_BYTES)
-                    head = head.decode("utf-8", errors="replace")[:NS_ONLY_HEAD_CHARS]
-                    if not any(tag in head for tag in NS_ONLY_TAGS):
-                        continue
+                if app_repo and not ns_only_script(full):
+                    continue
                 if os.path.getsize(full) > MAX_BYTES:
                     skipped.append({"repo": label, "path": rel, "reason": "too large"})
                     continue
