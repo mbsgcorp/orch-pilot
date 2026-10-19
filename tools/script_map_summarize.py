@@ -6,6 +6,7 @@ Usage: python3 tools/script_map_summarize.py --repo LABEL=PATH [--repo LABEL=PAT
                                              [--limit N] [--timeout SECONDS]
                                              [--branch NAME] [--namespace NAME]
                                              [--force KEY ...] [--regen-details FILE]
+                                             [--ns-only LABEL ...]
 
 Summaries come from a local command (for example a subscription CLI such as
 Codex): --command is split like a shell would split it, then run without a
@@ -57,6 +58,19 @@ code contradicts it, follow the code:" and the guidance on one line (newlines
 become spaces). Guidance is used for that run only. A missing FILE prints
 "error: FILE does not exist" and an invalid one "error: FILE is not a valid
 regenerate details file"; both exit 2.
+
+--ns-only LABEL (repeatable) marks the --repo with that LABEL as an app repo
+that mixes SuiteScript with other JavaScript, using the same rule as
+tools/script_map.py --ns-only (script_map.ns_only_script): the walk also skips
+every directory in script_map.NS_ONLY_EXCLUDED_DIRS (node_modules, .git,
+.netlify, dist, build, coverage, vendor) at any depth, and a *.js file is
+considered only if its first 4,000 characters contain "@NApiVersion" or
+"@NScriptType". Every other file there is ignored entirely: it is not hashed,
+no command is run and it is not counted; cache entries for such files are
+pruned like any file not found. A file whose head cannot be read counts as a
+failed unreadable file. A LABEL with no matching --repo prints
+"error: --ns-only LABEL has no matching --repo" and exits 2 without reading or
+writing the cache. Repos without --ns-only are summarized exactly as before.
 
 Every entry written gets "trigger": "first" (no previous entry), "code_changed"
 (previous entry had another sha256), "regenerate" (--force) or "reused"
@@ -248,6 +262,10 @@ def main(argv=None):
                              '{KEY: {requested_at, author, guidance}}}); a forced key\'s '
                              "author is recorded and its guidance is added to the prompt "
                              "for this run only")
+    parser.add_argument("--ns-only", action="append", default=None, metavar="LABEL",
+                        help="treat the --repo with this LABEL as an app repo: only *.js "
+                             "files tagged @NApiVersion or @NScriptType in their first "
+                             "4,000 characters are summarized; repeatable")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -290,6 +308,11 @@ def main(argv=None):
             return 2
         labels.add(label)
         repos.append((label, path))
+    for label in args.ns_only or []:
+        if label not in labels:
+            print(f"error: --ns-only {label} has no matching --repo", file=sys.stderr)
+            return 2
+    ns_only = set(args.ns_only or [])
 
     warnings = []
     for label, path in repos:
@@ -351,8 +374,21 @@ def main(argv=None):
     found = set()
     for label, root in repos:
         walk_errors = []
-        for rel, full in script_map.js_files(root, walk_errors):
+        app_repo = label in ns_only
+        extra = script_map.NS_ONLY_EXCLUDED_DIRS if app_repo else ()
+        for rel, full in script_map.js_files(root, walk_errors, extra):
             key = f"{ns_prefix}{label}:{rel}"
+            if app_repo:
+                try:
+                    qualifies = script_map.ns_only_script(full)
+                except OSError as exc:
+                    found.add(key)
+                    print(f"warning: {key} summary failed: unreadable: {exc.strerror}",
+                          file=sys.stderr)
+                    failed += 1
+                    continue
+                if not qualifies:
+                    continue
             found.add(key)
             try:
                 if os.path.getsize(full) > script_map.MAX_BYTES:

@@ -2679,6 +2679,16 @@ console.log(JSON.stringify(out));
         b_changes = [c for c in mixed["changes"] if c["repo"] == "B"]
         self.assertEqual([f["path"] for f in b_changes[0]["files"]], ["NetSuite/so_ue.js"])
 
+    def test_ns_only_script_helper(self):
+        head = self.write("app/head.js", USER_EVENT)
+        late = self.write("app/late.js", "// " + "x" * 3990 + "\n// filler\n" + USER_EVENT)
+        plain = self.write("app/plain.js", "export const app = () => fetch('/api');\n")
+        self.assertIs(script_map.ns_only_script(head), True)
+        self.assertIs(script_map.ns_only_script(late), False)
+        self.assertIs(script_map.ns_only_script(plain), False)
+        with self.assertRaises(OSError):
+            script_map.ns_only_script(self.root / "app" / "missing.js")
+
     def test_normalize_changes_malformed(self):
         for value in (None, {}, "x", 5, {"changes": []}):
             with self.subTest(value=value):
